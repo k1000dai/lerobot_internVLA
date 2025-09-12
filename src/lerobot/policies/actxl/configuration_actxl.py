@@ -34,8 +34,8 @@ class ACTXLConfig(PreTrainedConfig):
 
     # IO structure
     n_obs_steps: int = 1  # kept for compatibility; state history handled via state_history_steps
-    chunk_size: int = 100
-    n_action_steps: int = 100
+    chunk_size: int = 50
+    n_action_steps: int = 50
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
