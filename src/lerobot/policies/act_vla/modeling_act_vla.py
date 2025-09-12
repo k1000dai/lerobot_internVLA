@@ -90,7 +90,7 @@ class SiglipBackbone(nn.Module):
 
     def embed_language_tokens(self, input_ids: Tensor) -> Tensor:
         # Return token embeddings without running the text transformer
-        return self.model.text_model.get_input_embeddings()(input_ids)
+        return self.model.text_model.embeddings.token_embedding(input_ids)
 
 
 class ReasoningEncoder(nn.Module):
