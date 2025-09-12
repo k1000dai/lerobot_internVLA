@@ -68,6 +68,8 @@ class ACTXLConfig(PreTrainedConfig):
     dim_model: int = 1024
     n_heads: int = 16
     dim_feedforward: int = 8192
+    # Activation used in transformer feed-forward layers (matches ACT expectations)
+    feedforward_activation: str = "gelu"
     n_encoder_layers: int = 24
     # We allow multiple decoder layers; implementation uses them all
     n_decoder_layers: int = 8
