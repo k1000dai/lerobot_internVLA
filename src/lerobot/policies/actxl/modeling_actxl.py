@@ -473,8 +473,16 @@ class ACTXL(nn.Module):
 
         # Stack all tokens/positions -> (S,B,D)
         enc_tokens_t = torch.stack(enc_tokens, dim=0)
-        # Build combined pos embedding tensor; replace None with zeros
-        pos_elems = [p if p is not None else torch.zeros((1, 1, self.config.dim_model), device=enc_tokens_t.device, dtype=enc_tokens_t.dtype) for p in enc_pos]
+        # Build combined pos embedding tensor; replace None with zeros and ensure shape is (1,1,D) per token
+        pos_elems = []
+        for p in enc_pos:
+            if p is None:
+                p = torch.zeros((1, 1, self.config.dim_model), device=enc_tokens_t.device, dtype=enc_tokens_t.dtype)
+            else:
+                # Some position entries may be (1, D) due to list(...) over (L,1,D). Normalize to (1,1,D).
+                if p.ndim == 2:
+                    p = p.unsqueeze(1)
+            pos_elems.append(p)
         enc_pos_t = torch.cat(pos_elems, dim=0)
 
         # Encode/Decode
