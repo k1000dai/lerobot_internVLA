@@ -201,7 +201,7 @@ class ACTVLA(nn.Module):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Optional[Tensor], Optional[Tensor]]]:
         # batch may include: observation.state (B, D) or (B, T, D), observation.environment_state, observation.images (list of tensors),
-        # lang_tokens, lang_masks
+        # lang_tokens
         if "observation.images" in batch:
             batch_size = batch["observation.images"][0].shape[0]
         elif OBS_STATE in batch:
@@ -360,16 +360,15 @@ class ACTVLAPolicy(PreTrainedPolicy):
             OBS_STATE: deque(maxlen=self.config.n_obs_steps),
         }
 
-    def _prepare_language(self, batch: dict[str, Tensor]) -> tuple[Optional[Tensor], Optional[Tensor]]:
+    def _prepare_language(self, batch: dict[str, Tensor]) -> Optional[Tensor]:
         if not self.config.use_language or self.language_tokenizer is None:
-            return None, None
+            return None
         device = next(iter(batch.values())).device
         task = batch.get("task") or batch.get("instruction")
         if task is None:
-            return None, None
+            return None
         tasks = task if isinstance(task, list) else [task]
         if len(tasks) == 1:
-            # Expand to batch size
             bsize = batch[OBS_STATE].shape[0] if OBS_STATE in batch else next(iter(batch.values())).shape[0]
             tasks = [tasks[0] for _ in range(bsize)]
         tasks = [t if t.endswith("\n") else f"{t}\n" for t in tasks]
@@ -381,8 +380,7 @@ class ACTVLAPolicy(PreTrainedPolicy):
             return_tensors="pt",
         )
         lang_tokens = tokenized["input_ids"].to(device=device)
-        lang_masks = tokenized["attention_mask"].to(device=device, dtype=torch.bool)
-        return lang_tokens, lang_masks
+        return lang_tokens
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
@@ -413,11 +411,10 @@ class ACTVLAPolicy(PreTrainedPolicy):
             b[OBS_IMAGES] = [b[key] for key in self.config.image_features]
         else:
             b = batch
-        lang_tokens, lang_masks = self._prepare_language(b)
+        lang_tokens = self._prepare_language(b)
         if lang_tokens is not None:
             b = dict(b)
             b["lang_tokens"] = lang_tokens
-            b["lang_masks"] = lang_masks
         actions = self.model(b)[0]
         actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
         return actions
@@ -427,11 +424,10 @@ class ACTVLAPolicy(PreTrainedPolicy):
         if self.config.image_features:
             batch = dict(batch)
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
-        lang_tokens, lang_masks = self._prepare_language(batch)
+        lang_tokens = self._prepare_language(batch)
         if lang_tokens is not None:
             batch = dict(batch)
             batch["lang_tokens"] = lang_tokens
-            batch["lang_masks"] = lang_masks
         batch = self.normalize_targets(batch)
         actions_hat, (_mu_hat, _log_sigma_x2_hat) = self.model(batch)
 
