@@ -332,23 +332,7 @@ class ACTVLAPolicy(PreTrainedPolicy):
         self.reset()
 
     def get_optim_params(self) -> dict:
-        return [
-            {
-                "params": [
-                    p
-                    for n, p in self.named_parameters()
-                    if not n.startswith("model.siglip") and p.requires_grad
-                ]
-            },
-            {
-                "params": [
-                    p
-                    for n, p in self.named_parameters()
-                    if n.startswith("model.siglip") and p.requires_grad
-                ],
-                "lr": self.config.optimizer_lr_backbone,
-            },
-        ]
+        return self.parameters()
 
     def reset(self):
         if self.config.temporal_ensemble_coeff is not None:

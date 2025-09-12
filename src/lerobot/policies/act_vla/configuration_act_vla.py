@@ -94,7 +94,6 @@ class ACTVLAConfig(PreTrainedConfig):
     optimizer_eps: float = 1e-8
     optimizer_weight_decay: float = 1e-10
     optimizer_grad_clip_norm: float = 10
-    optimizer_lr_backbone: float = 1e-5
 
     # Scheduler (SmolVLA-style cosine with warmup)
     scheduler_warmup_steps: int = 1_000
