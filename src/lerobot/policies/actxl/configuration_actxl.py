@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import NormalizationMode
 from lerobot.optim.optimizers import AdamWConfig
+from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
 
 
 @PreTrainedConfig.register_subclass("actxl")
@@ -86,10 +87,17 @@ class ACTXLConfig(PreTrainedConfig):
     # Inference
     temporal_ensemble_coeff: float | None = None
 
-    # Training preset
+    # Training preset (align with SmolVLA defaults)
     optimizer_lr: float = 1e-4
-    optimizer_weight_decay: float = 1e-4
-    optimizer_lr_backbone: float = 1e-5
+    optimizer_betas: tuple[float, float] = (0.9, 0.95)
+    optimizer_eps: float = 1e-8
+    optimizer_weight_decay: float = 1e-10
+    optimizer_grad_clip_norm: float = 10.0
+
+    # Scheduler (cosine decay with warmup)
+    scheduler_warmup_steps: int = 1_000
+    scheduler_decay_steps: int = 30_000
+    scheduler_decay_lr: float = 2.5e-6
 
     def __post_init__(self):
         super().__post_init__()
@@ -104,10 +112,21 @@ class ACTXLConfig(PreTrainedConfig):
             )
 
     def get_optimizer_preset(self) -> AdamWConfig:
-        return AdamWConfig(lr=self.optimizer_lr, weight_decay=self.optimizer_weight_decay)
+        return AdamWConfig(
+            lr=self.optimizer_lr,
+            betas=self.optimizer_betas,
+            eps=self.optimizer_eps,
+            weight_decay=self.optimizer_weight_decay,
+            grad_clip_norm=self.optimizer_grad_clip_norm,
+        )
 
-    def get_scheduler_preset(self) -> None:
-        return None
+    def get_scheduler_preset(self) -> CosineDecayWithWarmupSchedulerConfig:
+        return CosineDecayWithWarmupSchedulerConfig(
+            peak_lr=self.optimizer_lr,
+            decay_lr=self.scheduler_decay_lr,
+            num_warmup_steps=self.scheduler_warmup_steps,
+            num_decay_steps=self.scheduler_decay_steps,
+        )
 
     def validate_features(self) -> None:
         # Accepts vision and/or env state, robot state optional (but recommended)
