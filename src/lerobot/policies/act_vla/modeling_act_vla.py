@@ -119,25 +119,7 @@ class ACTVLA(nn.Module):
         super().__init__()
         self.config = config
 
-        # Optional VAE encoder (as in ACT) over [cls, robot_state?, action_seq]
-        if self.config.use_vae:
-            self.vae_encoder = ACTEncoder(config, is_vae_encoder=True)
-            self.vae_encoder_cls_embed = nn.Embedding(1, config.dim_model)
-            if self.config.robot_state_feature:
-                self.vae_encoder_robot_state_input_proj = nn.Linear(
-                    self.config.robot_state_feature.shape[0], config.dim_model
-                )
-            self.vae_encoder_action_input_proj = nn.Linear(
-                self.config.action_feature.shape[0], config.dim_model
-            )
-            self.vae_encoder_latent_output_proj = nn.Linear(config.dim_model, config.latent_dim * 2)
-            num_input_token_encoder = 1 + config.chunk_size
-            if self.config.robot_state_feature:
-                num_input_token_encoder += 1
-            self.register_buffer(
-                "vae_encoder_pos_enc",
-                create_sinusoidal_pos_embedding(num_input_token_encoder, config.dim_model).unsqueeze(0),
-            )
+        # No VAE in ACTVLA, latent will be zeros.
 
         # SigLIP backbone (vision+text)
         self.siglip = SiglipBackbone(
@@ -219,7 +201,7 @@ class ACTVLA(nn.Module):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Optional[Tensor], Optional[Tensor]]]:
         # batch may include: observation.state (B, D) or (B, T, D), observation.environment_state, observation.images (list of tensors),
-        # lang_tokens, lang_masks, action (if training with VAE)
+        # lang_tokens, lang_masks
         if "observation.images" in batch:
             batch_size = batch["observation.images"][0].shape[0]
         elif OBS_STATE in batch:
@@ -229,38 +211,12 @@ class ACTVLA(nn.Module):
             # Fallback when only env_state provided
             batch_size = next(iter(batch.values())).shape[0]
 
-        # VAE latent
-        if self.config.use_vae and self.training and ACTION in batch:
-            cls_embed = self.vae_encoder_cls_embed.weight.unsqueeze(0).expand(batch_size, -1, -1)  # (B,1,D)
-            tokens = [cls_embed]
-            if self.config.robot_state_feature and OBS_STATE in batch:
-                robot_state = batch[OBS_STATE]
-                if robot_state.ndim == 3:  # (B, T, D)
-                    robot_state = robot_state[:, -1]
-                tokens.append(self.vae_encoder_robot_state_input_proj(robot_state).unsqueeze(1))
-            action_embed = self.vae_encoder_action_input_proj(batch[ACTION])  # (B, S, D)
-            tokens.append(action_embed)
-            vae_in = torch.cat(tokens, dim=1)  # (B, S+1/2, D)
-            pos = self.vae_encoder_pos_enc  # (1, S+1/2, D)
-            # Key padding mask: cls + maybe state are valid, then use action_is_pad if provided
-            if "action_is_pad" in batch:
-                num_prefix = 2 if (self.config.robot_state_feature and OBS_STATE in batch) else 1
-                cls_joint_is_pad = torch.zeros(batch_size, num_prefix, dtype=torch.bool, device=vae_in.device)
-                key_padding_mask = torch.cat([cls_joint_is_pad, batch["action_is_pad"]], dim=1)
-            else:
-                key_padding_mask = None
-            cls_out = self.vae_encoder(vae_in.permute(1, 0, 2), pos_embed=pos.permute(1, 0, 2), key_padding_mask=key_padding_mask)[0]
-            latent_params = self.vae_encoder_latent_output_proj(cls_out)
-            mu = latent_params[:, : self.config.latent_dim]
-            log_sigma_x2 = latent_params[:, self.config.latent_dim :]
-            latent = mu + log_sigma_x2.div(2).exp() * torch.randn_like(mu)
-        else:
-            mu = log_sigma_x2 = None
-            device = batch[OBS_STATE].device if OBS_STATE in batch else next(iter(batch.values())).device
-            latent = torch.zeros(batch_size, self.config.latent_dim, dtype=torch.float32, device=device)
+        # Latent token: zeros (no VAE)
+        device = batch[OBS_STATE].device if OBS_STATE in batch else next(iter(batch.values())).device
+        latent = torch.zeros(batch_size, self.config.latent_dim, dtype=torch.float32, device=device)
 
-        encoder_tokens = []  # list of (S, B, C)
-        encoder_pos = []     # list of (S, B, C)
+        encoder_tokens: list[Tensor] = []  # (S, B, C)
+        encoder_pos: list[Tensor] = []     # (S, B, C)
 
         # Latent token
         latent_tok = self.encoder_latent_input_proj(latent).unsqueeze(0)  # (1, B, C)
@@ -344,7 +300,7 @@ class ACTVLA(nn.Module):
         )
         dec_out = dec_out.transpose(0, 1)
         actions = self.action_head(dec_out)
-        return actions, (mu, log_sigma_x2)
+        return actions, (None, None)
 
 
 class ACTVLAPolicy(PreTrainedPolicy):
@@ -399,6 +355,10 @@ class ACTVLAPolicy(PreTrainedPolicy):
             self.temporal_ensembler.reset()
         else:
             self._action_queue = deque([], maxlen=self.config.n_action_steps)
+        # History queues for observations
+        self._queues = {
+            OBS_STATE: deque(maxlen=self.config.n_obs_steps),
+        }
 
     def _prepare_language(self, batch: dict[str, Tensor]) -> tuple[Optional[Tensor], Optional[Tensor]]:
         if not self.config.use_language or self.language_tokenizer is None:
@@ -439,6 +399,15 @@ class ACTVLAPolicy(PreTrainedPolicy):
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         self.eval()
         batch = self.normalize_inputs(batch)
+        # Populate state history queue and expose as time-major tensors
+        from lerobot.policies.utils import populate_queues
+        self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
+        # Stack to shape (B, n_obs_steps, D) if we have state
+        if OBS_STATE in self._queues and len(self._queues[OBS_STATE]) > 0:
+            # queues store individual tensors shaped (B, D); stack them
+            state_hist = torch.stack(list(self._queues[OBS_STATE]), dim=1)
+            batch = dict(batch)
+            batch[OBS_STATE] = state_hist
         if self.config.image_features:
             b = dict(batch)
             b[OBS_IMAGES] = [b[key] for key in self.config.image_features]
@@ -464,21 +433,14 @@ class ACTVLAPolicy(PreTrainedPolicy):
             batch["lang_tokens"] = lang_tokens
             batch["lang_masks"] = lang_masks
         batch = self.normalize_targets(batch)
-        actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
+        actions_hat, (_mu_hat, _log_sigma_x2_hat) = self.model(batch)
 
         l1_loss = (
             F.l1_loss(batch[ACTION], actions_hat, reduction="none") * ~batch.get("action_is_pad", torch.zeros_like(batch[ACTION][..., 0], dtype=torch.bool)).unsqueeze(-1)
         ).mean()
 
         loss_dict = {"l1_loss": l1_loss.item()}
-        if self.config.use_vae:
-            mean_kld = (
-                (-0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2) - (log_sigma_x2_hat).exp())).sum(-1).mean()
-            )
-            loss_dict["kld_loss"] = mean_kld.item()
-            loss = l1_loss + mean_kld * self.config.kl_weight
-        else:
-            loss = l1_loss
+        loss = l1_loss
 
         return loss, loss_dict
 

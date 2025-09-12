@@ -35,7 +35,7 @@ class ACTVLAConfig(PreTrainedConfig):
     """
 
     # Input / output structure
-    n_obs_steps: int = 1
+    n_obs_steps: int = 5
     chunk_size: int = 100
     n_action_steps: int = 100
 
@@ -75,11 +75,8 @@ class ACTVLAConfig(PreTrainedConfig):
     n_decoder_layers: int = 2
     dropout: float = 0.1
 
-    # VAE options (kept for parity with ACT)
-    use_vae: bool = True
+    # Latent token dimension for the decoder queries (not a VAE latent)
     latent_dim: int = 64
-    n_vae_encoder_layers: int = 4
-    kl_weight: float = 10.0
 
     # Optional temporal ensemble at inference (same constraint as ACT)
     temporal_ensemble_coeff: float | None = None
@@ -164,8 +161,8 @@ class ACTVLAConfig(PreTrainedConfig):
             )
 
     @property
-    def observation_delta_indices(self) -> None:
-        return None
+    def observation_delta_indices(self) -> list:
+        return list(range(1 - self.n_obs_steps, 1))
 
     @property
     def action_delta_indices(self) -> list:
