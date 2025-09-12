@@ -35,9 +35,9 @@ class ACTVLAConfig(PreTrainedConfig):
     """
 
     # Input / output structure
-    n_obs_steps: int = 5
-    chunk_size: int = 100
-    n_action_steps: int = 100
+    n_obs_steps: int = 2
+    chunk_size: int = 50
+    n_action_steps: int = 50
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
@@ -48,14 +48,14 @@ class ACTVLAConfig(PreTrainedConfig):
     )
 
     # Vision encoder (HF transformers)
-    vision_encoder_name: str | None = "google/siglip-so400m-patch14-384"
+    vision_encoder_name: str | None = "google/siglip-base-patch16-224"
     freeze_vision_encoder: bool = True
     # Optional resize to encoder's native res with padding (W, H). None to disable.
-    resize_imgs_with_padding: tuple[int, int] | None = (384, 384)
+    resize_imgs_with_padding: tuple[int, int] | None = (224, 224)
 
     # Language pathway
     use_language: bool = True
-    language_tokenizer_name: str = "google/siglip-so400m-patch14-384"
+    language_tokenizer_name: str = "google/siglip-base-patch16-224"
     tokenizer_max_length: int = 64
     pad_language_to: str = "longest"  # or "max_length"
 
