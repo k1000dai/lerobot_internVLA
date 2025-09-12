@@ -14,12 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 import time
 from contextlib import nullcontext
 from pprint import pformat
 from typing import Any
 
 import torch
+import torch.distributed as dist
 from termcolor import colored
 from torch.amp import GradScaler
 from torch.optim import Optimizer
@@ -110,7 +112,29 @@ def train(cfg: TrainPipelineConfig):
     cfg.validate()
     logging.info(pformat(cfg.to_dict()))
 
-    if cfg.wandb.enable and cfg.wandb.project:
+    # Distributed initialization (torchrun support)
+    ddp = False
+    rank = 0
+    local_rank = 0
+    world_size = 1
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        ddp = True
+        rank = int(os.environ.get("RANK", 0))
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        if not dist.is_initialized():
+            dist.init_process_group(backend=backend, init_method="env://")
+
+        # Ensure each process uses the correct device
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            # Force per-rank device in config so policy loads on the right GPU
+            if getattr(cfg, "policy", None) is not None and getattr(cfg.policy, "device", None) in (None, "cuda"):
+                cfg.policy.device = f"cuda:{local_rank}"
+
+    if cfg.wandb.enable and cfg.wandb.project and (not ddp or rank == 0):
         wandb_logger = WandBLogger(cfg)
     else:
         wandb_logger = None
@@ -120,28 +144,43 @@ def train(cfg: TrainPipelineConfig):
         set_seed(cfg.seed)
 
     # Check device is available
-    device = get_safe_torch_device(cfg.policy.device, log=True)
+    device = get_safe_torch_device(cfg.policy.device, log=(rank == 0))
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
-    logging.info("Creating dataset")
+    if rank == 0:
+        logging.info("Creating dataset")
     dataset = make_dataset(cfg)
 
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,
     # using the eval.py instead, with gym_dora environment and dora-rs.
     eval_env = None
-    if cfg.eval_freq > 0 and cfg.env is not None:
+    if rank == 0 and cfg.eval_freq > 0 and cfg.env is not None:
         logging.info("Creating env")
         eval_env = make_env(cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs)
 
-    logging.info("Creating policy")
+    if rank == 0:
+        logging.info("Creating policy")
     policy = make_policy(
         cfg=cfg.policy,
         ds_meta=dataset.meta,
     )
 
-    logging.info("Creating optimizer and scheduler")
+    # Wrap in DistributedDataParallel if needed
+    if ddp:
+        # Important: model must be on correct device already (handled by cfg.policy.device and make_policy)
+        device_ids = [local_rank] if device.type == "cuda" else None
+        output_device = local_rank if device.type == "cuda" else None
+        policy = torch.nn.parallel.DistributedDataParallel(
+            policy,
+            device_ids=device_ids,
+            output_device=output_device,
+            find_unused_parameters=False,
+        )
+
+    if rank == 0:
+        logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
     grad_scaler = GradScaler(device.type, enabled=cfg.policy.use_amp)
 
@@ -153,33 +192,57 @@ def train(cfg: TrainPipelineConfig):
     num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     num_total_params = sum(p.numel() for p in policy.parameters())
 
-    logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
-    if cfg.env is not None:
-        logging.info(f"{cfg.env.task=}")
-    logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
-    logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
-    logging.info(f"{dataset.num_episodes=}")
-    logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
-    logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
+    if rank == 0:
+        logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
+        if cfg.env is not None:
+            logging.info(f"{cfg.env.task=}")
+        logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
+        logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
+        logging.info(f"{dataset.num_episodes=}")
+        logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
+        logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
     if hasattr(cfg.policy, "drop_n_last_frames"):
-        shuffle = False
-        sampler = EpisodeAwareSampler(
+        # Episode-aware sampling
+        ea_sampler = EpisodeAwareSampler(
             dataset.episode_data_index,
             drop_n_last_frames=cfg.policy.drop_n_last_frames,
             shuffle=True,
         )
+        if ddp:
+            # Build a subset over the precomputed indices and use a DistributedSampler over it
+            subset = torch.utils.data.Subset(dataset, ea_sampler.indices)
+            ddp_sampler = torch.utils.data.distributed.DistributedSampler(
+                subset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False
+            )
+            dataloader_dataset = subset
+            dataloader_sampler = ddp_sampler
+            dataloader_shuffle = False
+        else:
+            dataloader_dataset = dataset
+            dataloader_sampler = ea_sampler
+            dataloader_shuffle = False
     else:
-        shuffle = True
-        sampler = None
+        # Default sampling
+        if ddp:
+            ddp_sampler = torch.utils.data.distributed.DistributedSampler(
+                dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False
+            )
+            dataloader_dataset = dataset
+            dataloader_sampler = ddp_sampler
+            dataloader_shuffle = False
+        else:
+            dataloader_dataset = dataset
+            dataloader_sampler = None
+            dataloader_shuffle = True
 
     dataloader = torch.utils.data.DataLoader(
-        dataset,
+        dataloader_dataset,
         num_workers=cfg.num_workers,
         batch_size=cfg.batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
+        shuffle=dataloader_shuffle,
+        sampler=dataloader_sampler,
         pin_memory=device.type == "cuda",
         drop_last=False,
     )
@@ -199,8 +262,12 @@ def train(cfg: TrainPipelineConfig):
         cfg.batch_size, dataset.num_frames, dataset.num_episodes, train_metrics, initial_step=step
     )
 
-    logging.info("Start offline training on a fixed dataset")
+    if rank == 0:
+        logging.info("Start offline training on a fixed dataset")
     for _ in range(step, cfg.steps):
+        # Ensure different shuffling between steps when using DistributedSampler
+        if ddp and hasattr(dataloader.sampler, "set_epoch"):
+            dataloader.sampler.set_epoch(step)
         start_time = time.perf_counter()
         batch = next(dl_iter)
         train_tracker.dataloading_s = time.perf_counter() - start_time
@@ -228,7 +295,7 @@ def train(cfg: TrainPipelineConfig):
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
 
-        if is_log_step:
+        if is_log_step and (not ddp or rank == 0):
             logging.info(train_tracker)
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
@@ -237,24 +304,31 @@ def train(cfg: TrainPipelineConfig):
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
 
-        if cfg.save_checkpoint and is_saving_step:
+        if cfg.save_checkpoint and is_saving_step and (not ddp or rank == 0):
             logging.info(f"Checkpoint policy after step {step}")
             checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
-            save_checkpoint(checkpoint_dir, step, cfg, policy, optimizer, lr_scheduler)
+            # In DDP, ensure all ranks have finished the step before saving
+            if ddp:
+                dist.barrier()
+            # Unwrap DDP for saving
+            to_save = policy.module if hasattr(policy, "module") else policy
+            save_checkpoint(checkpoint_dir, step, cfg, to_save, optimizer, lr_scheduler)
             update_last_checkpoint(checkpoint_dir)
             if wandb_logger:
                 wandb_logger.log_policy(checkpoint_dir)
 
-        if cfg.env and is_eval_step:
+        if cfg.env and is_eval_step and (not ddp or rank == 0):
             step_id = get_step_identifier(step, cfg.steps)
             logging.info(f"Eval policy at step {step}")
             with (
                 torch.no_grad(),
                 torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext(),
             ):
+                # Unwrap DDP for evaluation utilities that expect PreTrainedPolicy
+                eval_policy_obj = policy.module if hasattr(policy, "module") else policy
                 eval_info = eval_policy(
                     eval_env,
-                    policy,
+                    eval_policy_obj,
                     cfg.eval.n_episodes,
                     videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
                     max_episodes_rendered=4,
@@ -278,12 +352,14 @@ def train(cfg: TrainPipelineConfig):
                 wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
                 wandb_logger.log_video(eval_info["video_paths"][0], step, mode="eval")
 
-    if eval_env:
-        eval_env.close()
-    logging.info("End of training")
+    if rank == 0:
+        if eval_env:
+            eval_env.close()
+        logging.info("End of training")
 
-    if cfg.policy.push_to_hub:
-        policy.push_model_to_hub(cfg)
+    if cfg.policy.push_to_hub and (not ddp or rank == 0):
+        to_push = policy.module if hasattr(policy, "module") else policy
+        to_push.push_model_to_hub(cfg)
 
 
 def main():
