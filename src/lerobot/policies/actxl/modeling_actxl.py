@@ -131,44 +131,13 @@ class ACTXLPolicy(PreTrainedPolicy):
             batch = dict(batch)
             batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
 
-        # Prepare language tokens if tokenizer available and text present
-        if self.language_tokenizer is not None and ("task" in batch or "language_instruction" in batch):
-            tokens, masks = self.prepare_language(batch)
-            batch = dict(batch)
-            batch["language.input_ids"] = tokens
-            batch["language.attention_mask"] = masks
+        # Language handled in model from `task` key; no pre-tokenized inputs
 
         actions = self.model(batch)[0]
         actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
         return actions
 
-    def prepare_language(self, batch) -> tuple[Tensor, Tensor]:
-        device = next(self.parameters()).device
-        tasks = batch.get("task", batch.get("language_instruction", ""))
-        if isinstance(tasks, str):
-            tasks = [tasks]
-        if len(tasks) == 1:
-            # Broadcast to batch if single string
-            # Try infer batch size from state/images
-            if OBS_STATE in batch:
-                bsize = batch[OBS_STATE].shape[0] if batch[OBS_STATE].ndim == 2 else batch[OBS_STATE].shape[0]
-            elif OBS_IMAGES in batch and len(batch[OBS_IMAGES]) > 0:
-                bsize = batch[OBS_IMAGES][0].shape[0]
-            else:
-                bsize = 1
-            tasks = [tasks[0] for _ in range(bsize)]
-
-        tokenized = self.language_tokenizer.__call__(
-            tasks,
-            padding=self.config.pad_language_to,
-            padding_side="right",
-            max_length=self.config.tokenizer_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        input_ids = tokenized["input_ids"].to(device)
-        attn_mask = tokenized["attention_mask"].to(device, dtype=torch.bool)
-        return input_ids, attn_mask
+    # Note: language tokenization is now done inside ACTXL using `task` strings.
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         batch = self.normalize_inputs(batch)
@@ -237,6 +206,8 @@ class ACTXL(nn.Module):
         # Text encoder (optional)
         self.text_encoder = None
         self.text_hidden_size = None
+        # Language tokenizer for handling raw `task` strings in the model
+        self.language_tokenizer = None
         if self.config.language_model_name_or_path and (SiglipTextModel is not None or AutoModel is not None):
             try:
                 if SiglipTextModel is not None:
@@ -248,6 +219,14 @@ class ACTXL(nn.Module):
                 if self.config.freeze_text_encoder:
                     for p in self.text_encoder.parameters():
                         p.requires_grad = False
+                # Initialize tokenizer if available
+                if AutoTokenizer is not None:
+                    try:
+                        self.language_tokenizer = AutoTokenizer.from_pretrained(
+                            self.config.language_model_name_or_path
+                        )
+                    except Exception:
+                        self.language_tokenizer = None
             except Exception:
                 self.text_encoder = None
 
@@ -400,11 +379,33 @@ class ACTXL(nn.Module):
         # Prepare language tokens (optional) but defer adding to sequence
         lang_seq: Tensor | None = None  # (L,B,D)
         lang_pos: Tensor | None = None  # (L,1,D)
-        if self.text_encoder is not None and "language.input_ids" in batch:
-            ids = batch["language.input_ids"]
-            attn = batch.get("language.attention_mask", None)
-            if hasattr(self.text_encoder, "forward"):
-                text_out = self.text_encoder(input_ids=ids, attention_mask=attn)
+        if self.text_encoder is not None and ("task" in batch or "language_instruction" in batch):
+            # Prepare language tokens from raw `task` strings; do not use attention_mask
+            tasks = batch.get("task", batch.get("language_instruction", ""))
+            if isinstance(tasks, str):
+                tasks = [tasks]
+            # Broadcast single task to match batch size
+            if len(tasks) == 1:
+                if "observation.images" in batch and len(batch["observation.images"]) > 0:
+                    bsize = batch["observation.images"][0].shape[0]
+                elif OBS_STATE in batch:
+                    bsize = batch[OBS_STATE].shape[0] if batch[OBS_STATE].ndim >= 2 else batch[OBS_STATE].shape[0]
+                else:
+                    bsize = batch_size
+                tasks = [tasks[0] for _ in range(bsize)]
+
+            if self.language_tokenizer is not None and hasattr(self.text_encoder, "forward"):
+                tokenized = self.language_tokenizer.__call__(
+                    tasks,
+                    padding=self.config.pad_language_to,
+                    padding_side="right",
+                    max_length=self.config.tokenizer_max_length,
+                    truncation=True,
+                    return_tensors="pt",
+                )
+                ids = tokenized["input_ids"].to(latent_tok.device)
+                # Note: intentionally do not compute or pass attention_mask
+                text_out = self.text_encoder(input_ids=ids)
                 hid = text_out.last_hidden_state  # (B, L, H)
                 hid = self.encoder_lang_tok_input_proj(hid)  # (B, L, D)
                 L = hid.shape[1]
