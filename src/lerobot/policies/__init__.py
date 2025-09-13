@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .act.configuration_act import ACTConfig as ACTConfig
+from .actxl.configuration_actxl import ACTXLConfig as ACTXLConfig
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
 from .smolvla.configuration_smolvla import SmolVLAConfig as SmolVLAConfig
