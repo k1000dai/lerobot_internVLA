@@ -148,6 +148,19 @@ def train(cfg: TrainPipelineConfig):
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
+    # In DDP, prefetch dataset metadata on rank 0 to avoid race on first-read
+    if ddp:
+        if rank == 0:
+            from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+
+            try:
+                LeRobotDatasetMetadata(
+                    cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision, force_cache_sync=True
+                )
+            except Exception as e:
+                logging.warning(f"Prefetching dataset metadata failed with: {e}")
+        dist.barrier()
+
     if rank == 0:
         logging.info("Creating dataset")
     dataset = make_dataset(cfg)
