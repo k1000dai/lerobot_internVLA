@@ -19,6 +19,7 @@ from libero.libero.envs import OffScreenRenderEnv
 from tqdm import tqdm
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.policies.act_vla import ACTVLAConfig, ACTVLAPolicy
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -36,8 +37,6 @@ def eval() -> None:
     
     task_suite_name_list = [ "libero_spatial", "libero_object", "libero_goal", "libero_10"]
     time_pair = [(0,1),(0,5),(0,10),(0,30),(0,40),(0,50)]
-    eval_without_residual = False
-    eval_with_residual = True
     time_pair.reverse()  # Reverse to start with the smallest execute_horizon and inference_delay
     seed = 7
     # Set random seed
@@ -45,7 +44,8 @@ def eval() -> None:
     np.random.seed(seed)
 
     # --- Load Policy ---
-    policy = PreTrainedConfig.from_pretrained(policy_path)
+    #policy = PreTrainedConfig.from_pretrained(policy_path)
+    policy  = ACTVLAPolicy.from_pretrained(policy_path)
     policy = policy.to(DEVICE)
     
 
@@ -59,27 +59,24 @@ def eval() -> None:
                 continue
             logging.info(f"Evaluating with execute_horizon={execute_horizon}, inference_delay={inference_delay}")
             
-            if eval_without_residual:
-                # Evaluate without residual policy
-                video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}"
-                results = eval_libero(
-                    policy=policy,
-                    use_residual_policy=False,
-                    task_suite_name=task_suite_name,
-                    num_trials_per_task=num_trials_per_task,
-                    seed=seed,
-                    execute_horizon=execute_horizon,
-                    inference_delay=inference_delay,
-                    video_out_path=str(video_out_path)
-                )
-                with open(json_out_path, "a") as f:
-                    f.write(f"{results}\n")
+            video_out_path = pathlib.Path(video_out_base_path) / f"execute_horizon_{execute_horizon}_inference_delay_{inference_delay}"
+            results = eval_libero(
+                policy=policy,
+                task_suite_name=task_suite_name,
+                num_trials_per_task=num_trials_per_task,
+                seed=seed,
+                execute_horizon=execute_horizon,
+                inference_delay=inference_delay,
+                video_out_path=str(video_out_path)
+            )
+            with open(json_out_path, "a") as f:
+                f.write(f"{results}\n")
 
     # Log final results
     logging.info("=== Evaluation completed ===")
     
 
-def eval_libero(policy:PreTrainedPolicy, , 
+def eval_libero(policy:ACTVLAPolicy,
                 task_suite_name: str = "libero_spatial", 
                 num_trials_per_task: int = 10, 
                 seed: int = 7,
@@ -236,7 +233,7 @@ def eval_libero(policy:PreTrainedPolicy, ,
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_").replace("/", "_")
             video_path = (
-                pathlib.Path(video_out_path) / f"rollout_task_{task_id}_episode_{episode_idx}_{task_segment}_{suffix}{use_residual_suffix}.mp4"
+                pathlib.Path(video_out_path) / f"rollout_task_{task_id}_episode_{episode_idx}_{task_segment}_{suffix}.mp4"
             )
             fps = 30
             writer = imageio.get_writer(video_path, fps=fps)
