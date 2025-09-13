@@ -123,16 +123,38 @@ def train(cfg: TrainPipelineConfig):
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         world_size = int(os.environ.get("WORLD_SIZE", 1))
 
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        if not dist.is_initialized():
-            dist.init_process_group(backend=backend, init_method="env://")
-
-        # Ensure each process uses the correct device
+        # Safety: if torchrun spawned more processes than available GPUs, fall back to single process.
         if torch.cuda.is_available():
-            torch.cuda.set_device(local_rank)
-            # Force per-rank device in config so policy loads on the right GPU
-            if getattr(cfg, "policy", None) is not None and getattr(cfg.policy, "device", None) in (None, "cuda"):
-                cfg.policy.device = f"cuda:{local_rank}"
+            num_gpus = torch.cuda.device_count()
+            if world_size > num_gpus:
+                if rank == 0:
+                    logging.warning(
+                        f"WORLD_SIZE={world_size} but only {num_gpus} GPU(s) available. "
+                        "Falling back to single-process training to avoid OOM from multi-rank on one GPU."
+                    )
+                # Only let rank 0 continue; other ranks return early.
+                if rank != 0:
+                    return
+                ddp = False
+                rank = 0
+                local_rank = 0
+                world_size = 1
+                # Pin to cuda:0 explicitly if training on GPU
+                if torch.cuda.is_available() and getattr(cfg, "policy", None) is not None:
+                    if getattr(cfg.policy, "device", None) in (None, "cuda"):
+                        cfg.policy.device = "cuda:0"
+
+        if ddp:
+            backend = "nccl" if torch.cuda.is_available() else "gloo"
+            if not dist.is_initialized():
+                dist.init_process_group(backend=backend, init_method="env://")
+
+            # Ensure each process uses the correct device
+            if torch.cuda.is_available():
+                torch.cuda.set_device(local_rank)
+                # Force per-rank device in config so policy loads on the right GPU
+                if getattr(cfg, "policy", None) is not None and getattr(cfg.policy, "device", None) in (None, "cuda"):
+                    cfg.policy.device = f"cuda:{local_rank}"
 
     if cfg.wandb.enable and cfg.wandb.project and (not ddp or rank == 0):
         wandb_logger = WandBLogger(cfg)
