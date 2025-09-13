@@ -88,7 +88,7 @@ class ACTXLConfig(PreTrainedConfig):
     temporal_ensemble_coeff: float | None = None
 
     # Training preset (align with SmolVLA defaults)
-    optimizer_lr: float = 1e-4
+    optimizer_lr: float = 5e-4
     optimizer_betas: tuple[float, float] = (0.9, 0.95)
     optimizer_eps: float = 1e-8
     optimizer_weight_decay: float = 1e-10
@@ -97,7 +97,7 @@ class ACTXLConfig(PreTrainedConfig):
     # Scheduler (cosine decay with warmup)
     scheduler_warmup_steps: int = 1_000
     scheduler_decay_steps: int = 30_000
-    scheduler_decay_lr: float = 2.5e-6
+    scheduler_decay_lr: float = 5e-5
 
     def __post_init__(self):
         super().__post_init__()
