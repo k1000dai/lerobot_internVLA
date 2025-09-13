@@ -211,7 +211,7 @@ def train(cfg: TrainPipelineConfig):
             policy,
             device_ids=device_ids,
             output_device=output_device,
-            find_unused_parameters=False,
+            find_unused_parameters=True,
         )
 
     if rank == 0:
