@@ -339,18 +339,24 @@ def train(cfg: TrainPipelineConfig):
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
 
-        if cfg.save_checkpoint and is_saving_step and (not ddp or rank == 0):
-            logging.info(f"Checkpoint policy after step {step}")
-            checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
-            # In DDP, ensure all ranks have finished the step before saving
+        if cfg.save_checkpoint and is_saving_step:
+            # In DDP, synchronize ALL ranks before any rank starts saving.
             if ddp:
                 dist.barrier()
-            # Unwrap DDP for saving
-            to_save = policy.module if hasattr(policy, "module") else policy
-            save_checkpoint(checkpoint_dir, step, cfg, to_save, optimizer, lr_scheduler)
-            update_last_checkpoint(checkpoint_dir)
-            if wandb_logger:
-                wandb_logger.log_policy(checkpoint_dir)
+
+            if not ddp or rank == 0:
+                logging.info(f"Checkpoint policy after step {step}")
+                checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+                # Unwrap DDP for saving on rank 0 only
+                to_save = policy.module if hasattr(policy, "module") else policy
+                save_checkpoint(checkpoint_dir, step, cfg, to_save, optimizer, lr_scheduler)
+                update_last_checkpoint(checkpoint_dir)
+                if wandb_logger:
+                    wandb_logger.log_policy(checkpoint_dir)
+
+            # In DDP, wait for rank 0 to finish I/O before proceeding to next step
+            if ddp:
+                dist.barrier()
 
         if cfg.env and is_eval_step and (not ddp or rank == 0):
             step_id = get_step_identifier(step, cfg.steps)
