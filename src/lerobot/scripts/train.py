@@ -340,10 +340,7 @@ def train(cfg: TrainPipelineConfig):
             train_tracker.reset_averages()
 
         if cfg.save_checkpoint and is_saving_step:
-            # In DDP, synchronize ALL ranks before any rank starts saving.
-            if ddp:
-                dist.barrier()
-
+            # Save checkpoint only on rank 0 without stalling other ranks.
             if not ddp or rank == 0:
                 logging.info(f"Checkpoint policy after step {step}")
                 checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
@@ -353,10 +350,6 @@ def train(cfg: TrainPipelineConfig):
                 update_last_checkpoint(checkpoint_dir)
                 if wandb_logger:
                     wandb_logger.log_policy(checkpoint_dir)
-
-            # In DDP, wait for rank 0 to finish I/O before proceeding to next step
-            if ddp:
-                dist.barrier()
 
         if cfg.env and is_eval_step and (not ddp or rank == 0):
             step_id = get_step_identifier(step, cfg.steps)
