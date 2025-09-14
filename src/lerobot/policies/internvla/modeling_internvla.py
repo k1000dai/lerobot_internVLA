@@ -336,7 +336,7 @@ class InternVLAPolicy(PreTrainedPolicy):
             past_key_values=None,
             inputs_embeds=[embs, None],
             use_cache=False,
-            fill_kv_cache=False,
+            fill_kv_cache=True,
             adarms_cond=None,
         )
         # Take VLM stream outputs and slice the text part
