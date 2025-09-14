@@ -273,24 +273,17 @@ class InternVLAPolicy(PreTrainedPolicy):
             lab_padded[i, : len(lab)] = torch.tensor(lab, dtype=torch.long)
         lab_padded = lab_padded.to(device)
 
-        # Prepare pixel values (use all available cameras, same as Expert)
+        # Prepare pixel values
+        # NOTE: InternVLForConditionalGeneration expects a single Tensor for pixel_values.
+        # To avoid API mismatch (list has no .to()), use the first available camera here.
         pv = None
-        if images is not None and isinstance(images, list) and len(images) > 0:
+        if images is not None and isinstance(images, list) and len(images) > 0 and images[0] is not None:
             try:
                 vt_param = next(self.model.vlm_with_expert.get_vlm_model().vision_tower.parameters())
                 vt_device = vt_param.device
             except Exception:
                 vt_device = input_ids.device
-            pvs = []
-            for img in images:
-                if img is None:
-                    continue
-                pvs.append(img.to(device=vt_device, dtype=torch.bfloat16))
-            if len(pvs) == 1:
-                pv = pvs[0]
-            elif len(pvs) > 1:
-                # Many HF VLMs accept a list of pixel tensors for multi-image conditioning
-                pv = pvs
+            pv = images[0].to(device=vt_device, dtype=torch.bfloat16)
 
         # Compute CE loss with the VLM head (conditioned on images + text prompt)
         if pv is not None:
