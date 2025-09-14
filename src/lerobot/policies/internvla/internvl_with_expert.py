@@ -145,25 +145,21 @@ class InternVLWithExpertModel(nn.Module):
 
         # If using cross-attention mixing, adapt expert K/V projections to accept VLM memory width
         if "cross" in self.attention_mode:
-            try:
-                expert_layers = getattr(self.lm_expert, "layers", None)
-                if expert_layers is None and hasattr(self.lm_expert, "model"):
-                    expert_layers = getattr(self.lm_expert.model, "layers", None)
-                if expert_layers is None:
-                    raise AttributeError
-                in_features = config.text_config.num_key_value_heads * config.text_config.head_dim
-                out_features = text_cfg.num_key_value_heads * text_cfg.head_dim
-                bias_flag = getattr(text_cfg, "attention_bias", False)
-                for layer_idx in range(len(expert_layers)):
-                    if self.self_attn_every_n_layers > 0 and layer_idx % self.self_attn_every_n_layers == 0:
-                        # Keep self-attn layers untouched when interleaving
-                        continue
-                    layer = expert_layers[layer_idx]
-                    layer.self_attn.k_proj = nn.Linear(in_features, out_features, bias=bias_flag)
-                    layer.self_attn.v_proj = nn.Linear(in_features, out_features, bias=bias_flag)
-            except Exception:
-                # Fallback: leave expert projections unchanged for self-attn only mode
-                pass
+            expert_layers = getattr(self.lm_expert, "layers", None)
+            if expert_layers is None and hasattr(self.lm_expert, "model"):
+                expert_layers = getattr(self.lm_expert.model, "layers", None)
+            if expert_layers is None:
+                raise AttributeError("Expert model does not expose 'layers'; cross_attn requires accessible layers.")
+            in_features = config.text_config.num_key_value_heads * config.text_config.head_dim
+            out_features = text_cfg.num_key_value_heads * text_cfg.head_dim
+            bias_flag = getattr(text_cfg, "attention_bias", False)
+            for layer_idx in range(len(expert_layers)):
+                if self.self_attn_every_n_layers > 0 and layer_idx % self.self_attn_every_n_layers == 0:
+                    # Keep self-attn layers untouched when interleaving
+                    continue
+                layer = expert_layers[layer_idx]
+                layer.self_attn.k_proj = nn.Linear(in_features, out_features, bias=bias_flag)
+                layer.self_attn.v_proj = nn.Linear(in_features, out_features, bias=bias_flag)
 
         self._set_requires_grad()
 

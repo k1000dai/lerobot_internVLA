@@ -136,12 +136,8 @@ class InternVLAPolicy(PreTrainedPolicy):
 
         # Optional discrete auxiliary loss (FAST on-the-fly). Now conditions on images + text state
         if self.config.use_discrete_aux and raw_actions is not None:
-            try:
-                aux_loss = self._compute_discrete_aux_loss(raw_actions, raw_tasks, images=images, state=state)
-                loss = loss + self.config.discrete_loss_weight * aux_loss
-            except Exception as e:  # pragma: no cover
-                # Fail-safe: do not crash training if FAST is unavailable
-                pass
+            aux_loss = self._compute_discrete_aux_loss(raw_actions, raw_tasks, images=images, state=state)
+            loss = loss + self.config.discrete_loss_weight * aux_loss
 
         return loss, {"loss": loss.item()}
 
