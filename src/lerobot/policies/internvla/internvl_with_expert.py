@@ -344,8 +344,9 @@ class InternVLWithExpertModel(nn.Module):
 
             # Reset expert positions relative to expert tokens
             pos_expert = pos_expert - torch.min(pos_expert, dim=1, keepdim=True).values
+            # Apply RoPE to expert queries using expert token positions
             q_e = apply_rope(q_e, pos_expert)
-            k_e = apply_rope(k_e, pos_expert)
+            # Do NOT re-apply RoPE to keys derived from VLM prefix; they were already rotated with pos_prefix
 
             # Expert attends to VLM memory
             att_mask = attention_mask[:, -q_e.shape[1] :, : k_e.shape[1]]
