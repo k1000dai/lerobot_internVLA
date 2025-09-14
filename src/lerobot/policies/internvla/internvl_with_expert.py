@@ -89,11 +89,26 @@ class InternVLWithExpertModel(nn.Module):
         except Exception:
             self.processor = None
 
-        # Truncate VLM depth if requested
+        # Truncate VLM depth if requested (Qwen family layout differs; be robust)
         lm = self.get_vlm_model().language_model
+
+        def _resolve_layers_owner(text_model):
+            # Try common containers that own the decoder layers
+            for attr in ("model", "text_model", "transformer", "decoder", None):
+                owner = getattr(text_model, attr) if attr else text_model
+                layers = getattr(owner, "layers", None)
+                if layers is not None:
+                    return owner, layers
+            raise AttributeError("Could not find a 'layers' container in InternVL language_model.")
+
+        layers_owner, layers_list = _resolve_layers_owner(lm)
         if num_vlm_layers is not None and num_vlm_layers > 0:
-            lm.model.layers = lm.model.layers[:num_vlm_layers]
-        self.num_vlm_layers = len(lm.model.layers)
+            from torch import nn as _nn
+
+            new_layers = _nn.ModuleList(list(layers_list)[:num_vlm_layers])
+            setattr(layers_owner, "layers", new_layers)
+            layers_list = new_layers
+        self.num_vlm_layers = len(layers_list)
 
         # Build expert (Qwen-like) from text_config scaled down
         text_cfg = copy.deepcopy(config.text_config)
@@ -322,11 +337,30 @@ class InternVLWithExpertModel(nn.Module):
         fill_kv_cache: bool,
         adarms_cond: torch.Tensor | None = None,
     ):
-        models = [self.get_vlm_model().language_model.model, self.lm_expert.model]
+        # Resolve text/expert layer lists robustly
+        lm = self.get_vlm_model().language_model
+
+        def _resolve_layers(module):
+            for attr in ("model", "text_model", "transformer", "decoder", None):
+                base = getattr(module, attr) if attr else module
+                layers = getattr(base, "layers", None)
+                if layers is not None:
+                    return base, layers
+            raise AttributeError("Could not resolve language model layers for InternVL.")
+
+        text_base, text_layers = _resolve_layers(lm)
+        expert_layers = getattr(self.lm_expert, "layers", None)
+        if expert_layers is None and hasattr(self.lm_expert, "model"):
+            expert_layers = getattr(self.lm_expert.model, "layers", None)
+        if expert_layers is None:
+            raise AttributeError("Expert model does not expose a 'layers' attribute.")
+
+        model_layers = [text_layers, expert_layers]
+
         # Discover batch/shape
         batch_size = next(e for e in inputs_embeds if e is not None).shape[0]
         head_dim = self.head_dim
-        nlayers = len(models[0].layers)
+        nlayers = len(model_layers[0])
 
         for layer_idx in range(nlayers):
             # Choose self or cross attention mixing
@@ -336,7 +370,7 @@ class InternVLWithExpertModel(nn.Module):
                 or (self.self_attn_every_n_layers > 0 and layer_idx % self.self_attn_every_n_layers == 0)
             ):
                 att_outs, past_key_values = self._forward_attn_layer(
-                    models,
+                    model_layers,
                     inputs_embeds,
                     layer_idx,
                     position_ids,
@@ -350,7 +384,7 @@ class InternVLWithExpertModel(nn.Module):
                 )
             else:
                 att_outs, past_key_values = self._forward_cross_attn_layer(
-                    models,
+                    model_layers,
                     inputs_embeds,
                     layer_idx,
                     position_ids,
@@ -367,7 +401,7 @@ class InternVLWithExpertModel(nn.Module):
             outputs_embeds: list[torch.Tensor | None] = []
             start = 0
             for i, hidden_states in enumerate(inputs_embeds):
-                layer = models[i].layers[layer_idx]
+                layer = model_layers[i][layer_idx]
                 att_out = att_outs[i] if i < len(att_outs) else att_outs[0]
                 if hidden_states is None:
                     outputs_embeds.append(None)
@@ -389,12 +423,22 @@ class InternVLWithExpertModel(nn.Module):
             inputs_embeds = outputs_embeds
 
         # Final norms on each stream
+        def _get_norm(m):
+            for name in ("norm", "final_layernorm", "ln_f", "layer_norm"):
+                n = getattr(m, name, None)
+                if n is not None:
+                    return n
+            return None
+
+        text_norm_owner = text_base if _get_norm(text_base) is not None else lm
+        expert_norm_owner = self.lm_expert if _get_norm(self.lm_expert) is not None else getattr(self.lm_expert, "model", self.lm_expert)
+
         outputs_normed: list[torch.Tensor | None] = []
         for i, hidden_states in enumerate(inputs_embeds):
-            if hidden_states is not None:
-                outputs_normed.append(models[i].norm(hidden_states))
-            else:
+            if hidden_states is None:
                 outputs_normed.append(None)
+                continue
+            norm = _get_norm(text_norm_owner) if i == 0 else _get_norm(expert_norm_owner)
+            outputs_normed.append(norm(hidden_states) if norm is not None else hidden_states)
 
         return outputs_normed, past_key_values
-
