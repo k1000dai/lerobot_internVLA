@@ -45,26 +45,26 @@ class InternVLAConfig(PreTrainedConfig):
     use_cache: bool = True
     attention_mode: str = "cross_attn"  # "self_attn" | "cross_attn"
     self_attn_every_n_layers: int = 2
+    
+    # Knowledge insulation (pi0.5-style)
+    knowledge_insulation: bool = True
 
     # Finetuning / freezing
     freeze_vision_encoder: bool = True
     # Default: enable VLM training (insulated via KI); Expert-only can be re-enabled via CLI
-    train_expert_only: bool = False
+    train_expert_only: bool = False if knowledge_insulation else True
     train_state_proj: bool = True
-
-    # Knowledge insulation (pi0.5-style)
-    knowledge_insulation: bool = True
 
     # Expert/VLM sizing controls
     vlm_model_name: str = "OpenGVLab/InternVL3_5-4B-HF"
     load_vlm_weights: bool = True
     # Size down Expert to ~500M by default (adjust as needed)
     num_expert_layers: int = 12   # VLM depth divisor (e.g., 36→12)
-    num_vlm_layers: int = -1      # Leave VLM depth unchanged by default
+    num_vlm_layers: int = 12      # Leave VLM depth unchanged by default
     expert_width_multiplier: float = 0.5
 
     # Discrete auxiliary (FAST) for KI co-training
-    use_discrete_aux: bool = True
+    use_discrete_aux: bool = True if knowledge_insulation else False
     discrete_loss_weight: float = 1.0
     fast_repo_id: str = "physical-intelligence/fast"
     fast_skip_tokens: int = 128
