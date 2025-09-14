@@ -79,9 +79,27 @@ class InternVLAConfig(PreTrainedConfig):
             )
 
     def validate_features(self) -> None:
+        # Optionally add empty cameras
         for i in range(self.empty_cameras):
             key = f"observation.images.empty_camera_{i}"
             self.input_features[key] = PolicyFeature(type=FeatureType.VISUAL, shape=(3, 480, 640))
+        # Auto-shrink state/action pad dims to dataset shapes to reduce projection params
+        try:
+            rs = self.robot_state_feature
+            if rs is not None and len(rs.shape) > 0:
+                dim = int(rs.shape[0])
+                if dim > 0 and dim <= self.max_state_dim:
+                    self.max_state_dim = dim
+        except Exception:
+            pass
+        try:
+            af = self.action_feature
+            if af is not None and len(af.shape) > 0:
+                dim = int(af.shape[0])
+                if dim > 0 and dim <= self.max_action_dim:
+                    self.max_action_dim = dim
+        except Exception:
+            pass
 
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(
@@ -111,4 +129,3 @@ class InternVLAConfig(PreTrainedConfig):
     @property
     def reward_delta_indices(self) -> None:
         return None
-

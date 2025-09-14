@@ -263,6 +263,9 @@ class InternVLAFlowMatching(nn.Module):
         att_masks += [0] * lang_emb.shape[1]
         # State token
         st = self.state_proj(state)
+        # Match dtype to previous embeddings (usually VLM bfloat16)
+        if len(embs) > 0:
+            st = st.to(dtype=embs[-1].dtype)
         st = st[:, None, :]
         embs.append(st)
         bsz = st.shape[0]

@@ -446,11 +446,18 @@ class InternVLWithExpertModel(nn.Module):
                     att_out = att_out.to(layer.self_attn.o_proj.weight.dtype)
                 att_slice = att_out[:, start:end]
                 out = layer.self_attn.o_proj(att_slice)
+                # Ensure same dtype for residual add
+                if hidden_states.dtype != out.dtype:
+                    hidden_states = hidden_states.to(dtype=out.dtype)
                 out = out + hidden_states
                 x = layer.post_attention_layernorm(out)
                 # Simple FiLM gating on expert after post-attn LN
                 if adarms_cond is not None and i == 1:
                     x = x + adarms_cond[:, None, :].to(x.dtype)
+                # Match MLP weights dtype
+                mlp_dtype = layer.mlp.gate_proj.weight.dtype if hasattr(layer.mlp, "gate_proj") else x.dtype
+                if x.dtype != mlp_dtype:
+                    x = x.to(dtype=mlp_dtype)
                 x = layer.mlp(x)
                 x = x + out
                 outputs_embeds.append(x)
