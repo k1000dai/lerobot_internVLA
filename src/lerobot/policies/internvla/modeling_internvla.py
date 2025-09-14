@@ -169,27 +169,13 @@ class InternVLAPolicy(PreTrainedPolicy):
 
             vlm_tok = AutoTokenizer.from_pretrained(self.config.vlm_model_name)
 
-        # Prepare texts (Task + discretized text state)
+        # Prepare texts (use the same prompt as Expert: raw task only)
         if tasks is None:
             tasks = [""]
         if isinstance(tasks, str):
             tasks = [tasks]
         if len(tasks) == 1:
             tasks = [tasks[0] for _ in range(bsz)]
-
-        # Discretize state to text (similar to PI0FAST create_input_tokens)
-        state_txts = [""] * bsz
-        if state is not None:
-            # state: (B, S)
-            if state.ndim > 2:
-                st = state[:, -1, :]
-            else:
-                st = state
-            # Take up to 32 dims to keep prompt short
-            st = st[:, : min(st.shape[-1], 32)]
-            bins = torch.linspace(-1, 1, 256 + 1, device=st.device)[:-1]
-            disc = torch.bucketize(st, bins) - 1
-            state_txts = [" ".join(str(int(v.item())) for v in disc[i]) for i in range(bsz)]
 
         # Normalize actions to [-1,1] per sample/time dim as in PI0FAST
         def _minmax_norm(x: torch.Tensor) -> torch.Tensor:
@@ -206,45 +192,42 @@ class InternVLAPolicy(PreTrainedPolicy):
 
         # FAST encode batch
         fast_out = fast_proc(act_norm.cpu())
-        input_ids = fast_out["input_ids"]  # list of lists or tensor
+        # physical-intelligence/fast returns List[List[int]] (or dict with input_ids)
+        if isinstance(fast_out, dict):
+            fast_tokens = fast_out.get("input_ids", None)
+            if fast_tokens is None:
+                raise TypeError("FAST processor did not return 'input_ids'.")
+        elif isinstance(fast_out, (list, tuple)):
+            fast_tokens = fast_out
+        else:
+            raise TypeError(f"Unsupported FAST output type: {type(fast_out)}")
 
-        # Decode FAST ids to text with FAST BPE so we can re-tokenize with VLM tokenizer
-        action_texts = []
-        bpe_tok = getattr(fast_proc, "bpe_tokenizer", None)
-        if bpe_tok is None:
-            # Some versions expose tokenizer under .tokenizer
-            bpe_tok = getattr(fast_proc, "tokenizer", None)
-        for i in range(bsz):
-            ids = input_ids[i]
-            ids = ids.tolist() if hasattr(ids, "tolist") else ids
-            # Convert FAST token ids to a compact string
-            try:
-                s = bpe_tok.decode(ids)
-            except Exception:
-                s = "".join(map(chr, ids))  # conservative fallback
-            action_texts.append(f"Action: {s}")
-
-        # Prefix texts with the task and text-state (images provided separately via pixel_values)
-        prefix_texts = []
-        for i in range(bsz):
-            t = tasks[i] if isinstance(tasks[i], str) else ""
-            s = state_txts[i]
-            if s:
-                prefix_texts.append(f"Task: {t.strip()}, State: {s};")
-            else:
-                prefix_texts.append(f"Task: {t.strip()};")
-        # Tokenize separately to get prefix lengths, then concat
+        # Prefix texts = tasks only (no explicit 'Task:' prefix and no text-state; match Expert branch)
+        prefix_texts = [(tasks[i] if isinstance(tasks[i], str) else "").strip() for i in range(bsz)]
+        # Tokenize prefix to get VLM token IDs
         pref = vlm_tok(prefix_texts, add_special_tokens=True, padding=False, return_tensors=None)
-        actx = vlm_tok(action_texts, add_special_tokens=False, padding=False, return_tensors=None)
+
+        # Map FAST token ids into the tail of the VLM vocab (like PI0-FAST)
+        vocab_size = getattr(vlm_tok, "vocab_size", None)
+        if vocab_size is None:
+            raise RuntimeError("VLM tokenizer does not expose vocab_size")
+        skip = getattr(self.config, "fast_skip_tokens", 128)
+
+        def map_fast_to_vlm_ids(seq: list[int]) -> list[int]:
+            return [int(max(0, vocab_size - 1 - skip - x)) for x in seq]
 
         # Build per-sample concatenated inputs and labels
         concat_ids, attention_mask, labels = [], [], []
+        bos = vlm_tok("Action: ", add_special_tokens=False, return_tensors=None)
+        bos_ids = bos["input_ids"][0] if isinstance(bos["input_ids"], list) else bos["input_ids"].tolist()[0]
+        eos_id = vlm_tok.eos_token_id if hasattr(vlm_tok, "eos_token_id") else None
+
         for i in range(bsz):
             ids_pref = pref["input_ids"][i]
-            ids_act = actx["input_ids"][i]
-            ids = ids_pref + ids_act
+            ids_act = map_fast_to_vlm_ids(list(fast_tokens[i]))
+            ids = ids_pref + bos_ids + ids_act + ([eos_id] if eos_id is not None else [])
             mask = [1] * len(ids)
-            lab = [-100] * len(ids_pref) + ids_act[:]  # CE only on action part
+            lab = [-100] * (len(ids_pref) + len(bos_ids)) + ids_act[:] + ([-100] if eos_id is not None else [])
             concat_ids.append(ids)
             attention_mask.append(mask)
             labels.append(lab)

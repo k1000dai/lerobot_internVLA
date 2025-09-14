@@ -67,6 +67,7 @@ class InternVLAConfig(PreTrainedConfig):
     use_discrete_aux: bool = True
     discrete_loss_weight: float = 1.0
     fast_repo_id: str = "physical-intelligence/fast"
+    fast_skip_tokens: int = 128
 
     # Training presets
     optimizer_lr: float = 5e-4
