@@ -121,6 +121,10 @@ class InternVLAPolicy(PreTrainedPolicy):
         return actions
 
     def forward(self, batch: dict[str, Tensor], noise=None, time=None) -> tuple[Tensor, dict]:
+        # Keep raw elements needed for auxiliary discrete branch
+        raw_actions = batch.get(ACTION, None)
+        raw_tasks = batch.get("task", None)
+
         batch = self.normalize_inputs(batch)
         batch = self.normalize_targets(batch)
         images, img_masks = self.prepare_images(batch)
@@ -129,7 +133,122 @@ class InternVLAPolicy(PreTrainedPolicy):
         actions = pad_vector(batch[ACTION], self.config.max_action_dim)
         losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
         loss = losses.mean()
+
+        # Optional discrete auxiliary loss (FAST on-the-fly), text-only branch
+        if self.config.use_discrete_aux and raw_actions is not None:
+            try:
+                aux_loss = self._compute_discrete_aux_loss(raw_actions, raw_tasks)
+                loss = loss + self.config.discrete_loss_weight * aux_loss
+            except Exception as e:  # pragma: no cover
+                # Fail-safe: do not crash training if FAST is unavailable
+                pass
+
         return loss, {"loss": loss.item()}
+
+    def _compute_discrete_aux_loss(self, raw_actions: Tensor, tasks) -> Tensor:
+        """Compute CE loss on FAST-discretized actions with the VLM text head.
+
+        This does not change data inputs; FAST tokenization is done on-the-fly.
+        """
+        device = raw_actions.device
+        bsz = raw_actions.shape[0]
+
+        # Lazy-load processors/tokenizers
+        fast_proc = getattr(self, "_fast_processor", None)
+        if fast_proc is None:
+            from transformers import AutoProcessor  # type: ignore
+
+            self._fast_processor = AutoProcessor.from_pretrained(
+                self.config.fast_repo_id, trust_remote_code=True
+            )
+            fast_proc = self._fast_processor
+
+        vlm_tok = None
+        proc = getattr(self.model.vlm_with_expert, "processor", None)
+        if proc is not None and hasattr(proc, "tokenizer"):
+            vlm_tok = proc.tokenizer
+        if vlm_tok is None:
+            from transformers import AutoTokenizer  # type: ignore
+
+            vlm_tok = AutoTokenizer.from_pretrained(self.config.vlm_model_name)
+
+        # Prepare texts
+        if tasks is None:
+            tasks = [""]
+        if isinstance(tasks, str):
+            tasks = [tasks]
+        if len(tasks) == 1:
+            tasks = [tasks[0] for _ in range(bsz)]
+
+        # Normalize actions to [-1,1] per sample/time dim as in PI0FAST
+        def _minmax_norm(x: torch.Tensor) -> torch.Tensor:
+            mins = x.amin(dim=(1, 2), keepdim=True)
+            maxs = x.amax(dim=(1, 2), keepdim=True)
+            return 2 * (x - mins) / (maxs - mins + 1e-8) - 1
+
+        act = raw_actions
+        if act.ndim == 2:
+            act = act[:, None, :]
+        # Pad to configured action dim
+        act = pad_vector(act, self.config.max_action_dim)
+        act_norm = _minmax_norm(act)
+
+        # FAST encode batch
+        fast_out = fast_proc(act_norm.cpu())
+        input_ids = fast_out["input_ids"]  # list of lists or tensor
+
+        # Decode FAST ids to text with FAST BPE so we can re-tokenize with VLM tokenizer
+        action_texts = []
+        bpe_tok = getattr(fast_proc, "bpe_tokenizer", None)
+        if bpe_tok is None:
+            # Some versions expose tokenizer under .tokenizer
+            bpe_tok = getattr(fast_proc, "tokenizer", None)
+        for i in range(bsz):
+            ids = input_ids[i]
+            ids = ids.tolist() if hasattr(ids, "tolist") else ids
+            # Convert FAST token ids to a compact string
+            try:
+                s = bpe_tok.decode(ids)
+            except Exception:
+                s = "".join(map(chr, ids))  # conservative fallback
+            action_texts.append(f"Action: {s}")
+
+        # Prefix texts with the task (no images to keep branch simple/fast)
+        prefix_texts = [f"Task: {t.strip()}" if isinstance(t, str) else "Task: " for t in tasks]
+        # Tokenize separately to get prefix lengths, then concat
+        pref = vlm_tok(prefix_texts, add_special_tokens=True, padding=False, return_tensors=None)
+        actx = vlm_tok(action_texts, add_special_tokens=False, padding=False, return_tensors=None)
+
+        # Build per-sample concatenated inputs and labels
+        concat_ids, attention_mask, labels = [], [], []
+        for i in range(bsz):
+            ids_pref = pref["input_ids"][i]
+            ids_act = actx["input_ids"][i]
+            ids = ids_pref + ids_act
+            mask = [1] * len(ids)
+            lab = [-100] * len(ids_pref) + ids_act[:]  # CE only on action part
+            concat_ids.append(ids)
+            attention_mask.append(mask)
+            labels.append(lab)
+
+        # Pad to tensor
+        batch_inputs = {"input_ids": concat_ids, "attention_mask": attention_mask}
+        padded = vlm_tok.pad(batch_inputs, padding=True, return_tensors="pt")
+        input_ids = padded["input_ids"].to(device)
+        attn = padded["attention_mask"].to(device)
+
+        # Align labels shape to padding
+        max_len = input_ids.shape[1]
+        lab_padded = torch.full((bsz, max_len), -100, dtype=torch.long)
+        for i, lab in enumerate(labels):
+            lab_padded[i, : len(lab)] = torch.tensor(lab, dtype=torch.long)
+        lab_padded = lab_padded.to(device)
+
+        # Compute CE loss with the original VLM head (text-only)
+        outputs = self.model.vlm_with_expert.vlm(
+            input_ids=input_ids, attention_mask=attn, labels=lab_padded, use_cache=False
+        )
+        return outputs.loss
 
     def prepare_images(self, batch: dict[str, Tensor]):
         images = []
@@ -209,6 +328,7 @@ class InternVLAFlowMatching(nn.Module):
             num_vlm_layers=self.config.num_vlm_layers,
             self_attn_every_n_layers=self.config.self_attn_every_n_layers,
             expert_width_multiplier=self.config.expert_width_multiplier,
+            knowledge_insulation=self.config.knowledge_insulation,
         )
 
         # Projections
@@ -250,6 +370,8 @@ class InternVLAFlowMatching(nn.Module):
             img_emb = self.vlm_with_expert.embed_image(img.to(dtype=torch.bfloat16))
             # normalize as in eager impl
             img_emb = img_emb * math.sqrt(img_emb.shape[-1])
+            if self.config.knowledge_insulation:
+                img_emb = img_emb.detach()
             bsz, n = img_emb.shape[:2]
             img_mask = mask[:, None].expand(bsz, n)
             embs.append(img_emb)
@@ -258,6 +380,8 @@ class InternVLAFlowMatching(nn.Module):
         # Language
         lang_emb = self.vlm_with_expert.embed_language_tokens(lang_tokens)
         lang_emb = lang_emb * math.sqrt(lang_emb.shape[-1])
+        if self.config.knowledge_insulation:
+            lang_emb = lang_emb.detach()
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
         att_masks += [0] * lang_emb.shape[1]

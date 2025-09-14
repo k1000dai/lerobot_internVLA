@@ -1,6 +1,7 @@
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 
 import copy
+import contextlib
 import math
 from typing import Any
 
@@ -61,6 +62,7 @@ class InternVLWithExpertModel(nn.Module):
         num_vlm_layers: int = -1,
         self_attn_every_n_layers: int = 2,
         expert_width_multiplier: float = 0.75,
+        knowledge_insulation: bool = False,
     ) -> None:
         super().__init__()
         if InternVLForConditionalGeneration is None:
@@ -72,6 +74,7 @@ class InternVLWithExpertModel(nn.Module):
         self.freeze_vision_encoder = freeze_vision_encoder
         self.attention_mode = attention_mode
         self.self_attn_every_n_layers = self_attn_every_n_layers
+        self.knowledge_insulation = knowledge_insulation
 
         # Load InternVL VLM
         if load_vlm_weights:
@@ -245,16 +248,19 @@ class InternVLWithExpertModel(nn.Module):
             if hidden_states is None:
                 continue
             layer = model_layers[i][layer_idx]
-            hidden_states = layer.input_layernorm(hidden_states)
-            # Inject knowledge-insulation condition into expert stream (simple FiLM add)
-            if adarms_cond is not None and i == 1:
-                hidden_states = hidden_states + adarms_cond[:, None, :].to(hidden_states.dtype)
+            # For KI, insulate VLM stream (i==0) by computing q/k/v without grad
+            no_grad_ctx = torch.no_grad() if (self.knowledge_insulation and i == 0) else contextlib.nullcontext()
+            with no_grad_ctx:
+                hidden_states = layer.input_layernorm(hidden_states)
+                # Inject knowledge-insulation condition into expert stream (simple FiLM add)
+                if adarms_cond is not None and i == 1:
+                    hidden_states = hidden_states + adarms_cond[:, None, :].to(hidden_states.dtype)
 
-            shape = (*hidden_states.shape[:-1], -1, layer.self_attn.head_dim)
-            hs = hidden_states.to(dtype=layer.self_attn.q_proj.weight.dtype)
-            q = layer.self_attn.q_proj(hs).view(shape)
-            k = layer.self_attn.k_proj(hs).view(shape)
-            v = layer.self_attn.v_proj(hs).view(shape)
+                shape = (*hidden_states.shape[:-1], -1, layer.self_attn.head_dim)
+                hs = hidden_states.to(dtype=layer.self_attn.q_proj.weight.dtype)
+                q = layer.self_attn.q_proj(hs).view(shape)
+                k = layer.self_attn.k_proj(hs).view(shape)
+                v = layer.self_attn.v_proj(hs).view(shape)
             qs.append(q)
             ks.append(k)
             vs.append(v)
@@ -303,14 +309,17 @@ class InternVLWithExpertModel(nn.Module):
             pos_prefix, pos_expert = position_ids[:, :seq_len], position_ids[:, seq_len:]
             mask_prefix = attention_mask[:, :seq_len, :seq_len]
             vlm_layer = model_layers[0][layer_idx]
-            hs = vlm_layer.input_layernorm(inputs_embeds[0])
-            q_shape = (*hs.shape[:-1], -1, vlm_layer.self_attn.head_dim)
-            hs = hs.to(dtype=vlm_layer.self_attn.q_proj.weight.dtype)
-            q = vlm_layer.self_attn.q_proj(hs).view(q_shape)
-            k = vlm_layer.self_attn.k_proj(hs).view(q_shape)
-            v = vlm_layer.self_attn.v_proj(hs).view(q_shape)
-            q = apply_rope(q, pos_prefix)
-            k = apply_rope(k, pos_prefix)
+            # For KI, compute VLM prefix q/k/v without grad
+            no_grad_ctx = torch.no_grad() if self.knowledge_insulation else contextlib.nullcontext()
+            with no_grad_ctx:
+                hs = vlm_layer.input_layernorm(inputs_embeds[0])
+                q_shape = (*hs.shape[:-1], -1, vlm_layer.self_attn.head_dim)
+                hs = hs.to(dtype=vlm_layer.self_attn.q_proj.weight.dtype)
+                q = vlm_layer.self_attn.q_proj(hs).view(q_shape)
+                k = vlm_layer.self_attn.k_proj(hs).view(q_shape)
+                v = vlm_layer.self_attn.v_proj(hs).view(q_shape)
+                q = apply_rope(q, pos_prefix)
+                k = apply_rope(k, pos_prefix)
             att_out = self.get_attention_interface()(mask_prefix, batch_size, head_dim, q, k, v)
             att_outputs.append(att_out)
         else:

@@ -52,14 +52,20 @@ class InternVLAConfig(PreTrainedConfig):
     train_state_proj: bool = True
 
     # Knowledge insulation (pi0.5-style)
-    knowledge_insulation: bool = False
+    knowledge_insulation: bool = True
 
     # Expert/VLM sizing controls
     vlm_model_name: str = "OpenGVLab/InternVL3_5-4B-HF"
     load_vlm_weights: bool = True
-    num_expert_layers: int = -1  # <=0 → mirror VLM depth (possibly truncated)
-    num_vlm_layers: int = -1     # <=0 → use all layers from VLM
-    expert_width_multiplier: float = 0.75
+    # Size down Expert to ~500M by default (adjust as needed)
+    num_expert_layers: int = 12   # VLM depth divisor (e.g., 36→12)
+    num_vlm_layers: int = 24      # Truncate VLM (e.g., 36→24) for efficiency
+    expert_width_multiplier: float = 0.5
+
+    # Discrete auxiliary (FAST) for KI co-training
+    use_discrete_aux: bool = False
+    discrete_loss_weight: float = 1.0
+    fast_repo_id: str = "physical-intelligence/fast"
 
     # Training presets
     optimizer_lr: float = 1e-4
