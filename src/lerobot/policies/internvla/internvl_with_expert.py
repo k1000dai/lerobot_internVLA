@@ -247,7 +247,12 @@ class InternVLWithExpertModel(nn.Module):
         for i, hidden_states in enumerate(inputs_embeds):
             if hidden_states is None:
                 continue
-            layer = model_layers[i][layer_idx]
+            # Use modular indexing for expert when it has fewer layers than VLM
+            if i == 1:
+                exp_layers = model_layers[1]
+                layer = exp_layers[layer_idx % len(exp_layers)]
+            else:
+                layer = model_layers[0][layer_idx]
             # For KI, insulate VLM stream (i==0) by computing q/k/v without grad
             no_grad_ctx = torch.no_grad() if (self.knowledge_insulation and i == 0) else contextlib.nullcontext()
             with no_grad_ctx:
@@ -336,7 +341,8 @@ class InternVLWithExpertModel(nn.Module):
                 v = past_key_values[layer_idx]["value_states"]
 
         # Expert queries attend to VLM K,V (projected into expert width)
-        expert_layer = model_layers[1][layer_idx]
+        exp_layers = model_layers[1]
+        expert_layer = exp_layers[layer_idx % len(exp_layers)]
         if expert_layer is not None:
             hs = expert_layer.input_layernorm(inputs_embeds[1])
             if adarms_cond is not None:
@@ -446,7 +452,11 @@ class InternVLWithExpertModel(nn.Module):
             outputs_embeds: list[torch.Tensor | None] = []
             start = 0
             for i, hidden_states in enumerate(inputs_embeds):
-                layer = model_layers[i][layer_idx]
+                if i == 1:
+                    exp_layers = model_layers[1]
+                    layer = exp_layers[layer_idx % len(exp_layers)]
+                else:
+                    layer = model_layers[0][layer_idx]
                 att_out = att_outs[i] if i < len(att_outs) else att_outs[0]
                 if hidden_states is None:
                     outputs_embeds.append(None)

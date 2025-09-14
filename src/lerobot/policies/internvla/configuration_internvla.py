@@ -59,7 +59,7 @@ class InternVLAConfig(PreTrainedConfig):
     load_vlm_weights: bool = True
     # Size down Expert to ~500M by default (adjust as needed)
     num_expert_layers: int = 12   # VLM depth divisor (e.g., 36→12)
-    num_vlm_layers: int = 24      # Truncate VLM (e.g., 36→24) for efficiency
+    num_vlm_layers: int = -1      # Leave VLM depth unchanged by default
     expert_width_multiplier: float = 0.5
 
     # Discrete auxiliary (FAST) for KI co-training
