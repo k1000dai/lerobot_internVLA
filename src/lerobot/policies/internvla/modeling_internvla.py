@@ -144,8 +144,8 @@ class InternVLAPolicy(PreTrainedPolicy):
     def _compute_discrete_aux_loss(self, raw_actions: Tensor, tasks, *, images=None, state: Tensor | None = None) -> Tensor:
         """Compute CE loss on FAST-discretized actions with the VLM text head.
 
-        Uses pixel images (first available camera) and a discretized text-state in the prefix,
-        matching the intended VLM conditioning (image encoder + prompt + text state).
+        Prefix conditioning uses image embeddings (from available cameras) and the task text.
+        Note: ``state`` is currently unused for this auxiliary loss.
         """
         device = raw_actions.device
         bsz = raw_actions.shape[0]
@@ -273,19 +273,7 @@ class InternVLAPolicy(PreTrainedPolicy):
             lab_padded[i, : len(lab)] = torch.tensor(lab, dtype=torch.long)
         lab_padded = lab_padded.to(device)
 
-        # Prepare pixel values
-        # NOTE: InternVLForConditionalGeneration expects a single Tensor for pixel_values.
-        # To avoid API mismatch (list has no .to()), use the first available camera here.
-        pv = None
-        if images is not None and isinstance(images, list) and len(images) > 0 and images[0] is not None:
-            try:
-                vt_param = next(self.model.vlm_with_expert.get_vlm_model().vision_tower.parameters())
-                vt_device = vt_param.device
-            except Exception:
-                vt_device = input_ids.device
-            pv = images[0].to(device=vt_device, dtype=torch.bfloat16)
-
-        # ---- Low-level path: embed images + text, drive language model via inputs_embeds ----
+        # ---- Embed images + text, drive language model via inputs_embeds ----
         # Embed all available camera images (same as Expert path)
         img_embs_list = []
         if images is not None and isinstance(images, list) and len(images) > 0:

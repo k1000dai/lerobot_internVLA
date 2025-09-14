@@ -65,7 +65,7 @@ class InternVLAConfig(PreTrainedConfig):
 
     # Discrete auxiliary (FAST) for KI co-training
     use_discrete_aux: bool = True if knowledge_insulation else False
-    discrete_loss_weight: float = 1.0
+    discrete_loss_weight: float = 0.5
     fast_repo_id: str = "physical-intelligence/fast"
     fast_skip_tokens: int = 128
 
