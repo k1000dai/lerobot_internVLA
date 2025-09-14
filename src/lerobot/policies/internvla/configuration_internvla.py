@@ -48,7 +48,8 @@ class InternVLAConfig(PreTrainedConfig):
 
     # Finetuning / freezing
     freeze_vision_encoder: bool = True
-    train_expert_only: bool = True
+    # Default: enable VLM training (insulated via KI); Expert-only can be re-enabled via CLI
+    train_expert_only: bool = False
     train_state_proj: bool = True
 
     # Knowledge insulation (pi0.5-style)
@@ -63,7 +64,7 @@ class InternVLAConfig(PreTrainedConfig):
     expert_width_multiplier: float = 0.5
 
     # Discrete auxiliary (FAST) for KI co-training
-    use_discrete_aux: bool = False
+    use_discrete_aux: bool = True
     discrete_loss_weight: float = 1.0
     fast_repo_id: str = "physical-intelligence/fast"
 

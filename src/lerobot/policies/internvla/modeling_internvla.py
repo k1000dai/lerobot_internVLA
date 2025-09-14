@@ -134,10 +134,10 @@ class InternVLAPolicy(PreTrainedPolicy):
         losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
         loss = losses.mean()
 
-        # Optional discrete auxiliary loss (FAST on-the-fly), text-only branch
+        # Optional discrete auxiliary loss (FAST on-the-fly). Now conditions on images + text state
         if self.config.use_discrete_aux and raw_actions is not None:
             try:
-                aux_loss = self._compute_discrete_aux_loss(raw_actions, raw_tasks)
+                aux_loss = self._compute_discrete_aux_loss(raw_actions, raw_tasks, images=images, state=state)
                 loss = loss + self.config.discrete_loss_weight * aux_loss
             except Exception as e:  # pragma: no cover
                 # Fail-safe: do not crash training if FAST is unavailable
@@ -145,10 +145,11 @@ class InternVLAPolicy(PreTrainedPolicy):
 
         return loss, {"loss": loss.item()}
 
-    def _compute_discrete_aux_loss(self, raw_actions: Tensor, tasks) -> Tensor:
+    def _compute_discrete_aux_loss(self, raw_actions: Tensor, tasks, *, images=None, state: Tensor | None = None) -> Tensor:
         """Compute CE loss on FAST-discretized actions with the VLM text head.
 
-        This does not change data inputs; FAST tokenization is done on-the-fly.
+        Uses pixel images (first available camera) and a discretized text-state in the prefix,
+        matching the intended VLM conditioning (image encoder + prompt + text state).
         """
         device = raw_actions.device
         bsz = raw_actions.shape[0]
@@ -172,13 +173,27 @@ class InternVLAPolicy(PreTrainedPolicy):
 
             vlm_tok = AutoTokenizer.from_pretrained(self.config.vlm_model_name)
 
-        # Prepare texts
+        # Prepare texts (Task + discretized text state)
         if tasks is None:
             tasks = [""]
         if isinstance(tasks, str):
             tasks = [tasks]
         if len(tasks) == 1:
             tasks = [tasks[0] for _ in range(bsz)]
+
+        # Discretize state to text (similar to PI0FAST create_input_tokens)
+        state_txts = [""] * bsz
+        if state is not None:
+            # state: (B, S)
+            if state.ndim > 2:
+                st = state[:, -1, :]
+            else:
+                st = state
+            # Take up to 32 dims to keep prompt short
+            st = st[:, : min(st.shape[-1], 32)]
+            bins = torch.linspace(-1, 1, 256 + 1, device=st.device)[:-1]
+            disc = torch.bucketize(st, bins) - 1
+            state_txts = [" ".join(str(int(v.item())) for v in disc[i]) for i in range(bsz)]
 
         # Normalize actions to [-1,1] per sample/time dim as in PI0FAST
         def _minmax_norm(x: torch.Tensor) -> torch.Tensor:
@@ -213,8 +228,15 @@ class InternVLAPolicy(PreTrainedPolicy):
                 s = "".join(map(chr, ids))  # conservative fallback
             action_texts.append(f"Action: {s}")
 
-        # Prefix texts with the task (no images to keep branch simple/fast)
-        prefix_texts = [f"Task: {t.strip()}" if isinstance(t, str) else "Task: " for t in tasks]
+        # Prefix texts with the task and text-state (images provided separately via pixel_values)
+        prefix_texts = []
+        for i in range(bsz):
+            t = tasks[i] if isinstance(tasks[i], str) else ""
+            s = state_txts[i]
+            if s:
+                prefix_texts.append(f"Task: {t.strip()}, State: {s};")
+            else:
+                prefix_texts.append(f"Task: {t.strip()};")
         # Tokenize separately to get prefix lengths, then concat
         pref = vlm_tok(prefix_texts, add_special_tokens=True, padding=False, return_tensors=None)
         actx = vlm_tok(action_texts, add_special_tokens=False, padding=False, return_tensors=None)
@@ -244,10 +266,34 @@ class InternVLAPolicy(PreTrainedPolicy):
             lab_padded[i, : len(lab)] = torch.tensor(lab, dtype=torch.long)
         lab_padded = lab_padded.to(device)
 
-        # Compute CE loss with the original VLM head (text-only)
-        outputs = self.model.vlm_with_expert.vlm(
-            input_ids=input_ids, attention_mask=attn, labels=lab_padded, use_cache=False
-        )
+        # Prepare pixel values (use all available cameras, same as Expert)
+        pv = None
+        if images is not None and isinstance(images, list) and len(images) > 0:
+            try:
+                vt_param = next(self.model.vlm_with_expert.get_vlm_model().vision_tower.parameters())
+                vt_device = vt_param.device
+            except Exception:
+                vt_device = input_ids.device
+            pvs = []
+            for img in images:
+                if img is None:
+                    continue
+                pvs.append(img.to(device=vt_device, dtype=torch.bfloat16))
+            if len(pvs) == 1:
+                pv = pvs[0]
+            elif len(pvs) > 1:
+                # Many HF VLMs accept a list of pixel tensors for multi-image conditioning
+                pv = pvs
+
+        # Compute CE loss with the VLM head (conditioned on images + text prompt)
+        if pv is not None:
+            outputs = self.model.vlm_with_expert.vlm(
+                pixel_values=pv, input_ids=input_ids, attention_mask=attn, labels=lab_padded, use_cache=False
+            )
+        else:
+            outputs = self.model.vlm_with_expert.vlm(
+                input_ids=input_ids, attention_mask=attn, labels=lab_padded, use_cache=False
+            )
         return outputs.loss
 
     def prepare_images(self, batch: dict[str, Tensor]):
