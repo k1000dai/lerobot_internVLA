@@ -36,6 +36,7 @@ from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.policies.act_vla.configuration_act_vla import ACTVLAConfig
 from lerobot.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.policies.vqbet.configuration_vqbet import VQBeTConfig
+from lerobot.policies.internvl35.configuration_internvl35 import InternVL35Config
 
 
 def get_policy_class(name: str) -> PreTrainedPolicy:
@@ -84,6 +85,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.policies.act_vla.modeling_act_vla import ACTVLAPolicy
 
         return ACTVLAPolicy
+    elif name == "internvl35":
+        from lerobot.policies.internvl35.modeling_internvl35 import InternVL35Policy
+
+        return InternVL35Policy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -111,6 +116,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return RewardClassifierConfig(**kwargs)
     elif policy_type == "act_vla":
         return ACTVLAConfig(**kwargs)
+    elif policy_type == "internvl35":
+        return InternVL35Config(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 

@@ -121,6 +121,7 @@ intelrealsense = [
 pi0 = ["lerobot[transformers-dep]"]
 smolvla = ["lerobot[transformers-dep]", "num2words>=0.5.14", "accelerate>=1.7.0", "safetensors>=0.4.3"]
 hilserl = ["lerobot[transformers-dep]", "gym-hil>=0.1.9", "lerobot[grpcio-dep]", "lerobot[placo-dep]"]
+internvl35 = ["lerobot[transformers-dep]", "openpi", "safetensors>=0.4.3"]
 
 # Features
 async = ["lerobot[grpcio-dep]", "matplotlib>=3.10.3"]
@@ -145,6 +146,7 @@ all = [
     "lerobot[intelrealsense]",
     "lerobot[pi0]",
     "lerobot[smolvla]",
+    "lerobot[internvl35]",
     "lerobot[hilserl]",
     "lerobot[async]",
     "lerobot[dev]",
