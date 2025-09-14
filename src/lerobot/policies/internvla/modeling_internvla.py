@@ -210,7 +210,10 @@ class InternVLAPolicy(PreTrainedPolicy):
         # Map FAST token ids into the tail of the VLM vocab (like PI0-FAST)
         vocab_size = getattr(vlm_tok, "vocab_size", None)
         if vocab_size is None:
-            raise RuntimeError("VLM tokenizer does not expose vocab_size")
+            try:
+                vocab_size = len(vlm_tok.get_vocab())
+            except Exception as e:
+                raise RuntimeError("Unable to get VLM tokenizer vocab size") from e
         skip = getattr(self.config, "fast_skip_tokens", 128)
 
         def map_fast_to_vlm_ids(seq: list[int]) -> list[int]:
@@ -218,16 +221,34 @@ class InternVLAPolicy(PreTrainedPolicy):
 
         # Build per-sample concatenated inputs and labels
         concat_ids, attention_mask, labels = [], [], []
+
         bos = vlm_tok("Action: ", add_special_tokens=False, return_tensors=None)
-        bos_ids = bos["input_ids"][0] if isinstance(bos["input_ids"], list) else bos["input_ids"].tolist()[0]
-        eos_id = vlm_tok.eos_token_id if hasattr(vlm_tok, "eos_token_id") else None
+        raw_bos = bos.get("input_ids") if isinstance(bos, dict) else bos
+        # Normalize BOS ids to a flat list[int]
+        if isinstance(raw_bos, list):
+            if len(raw_bos) > 0 and isinstance(raw_bos[0], list):
+                bos_ids = list(raw_bos[0])
+            else:
+                bos_ids = list(raw_bos)
+        elif hasattr(raw_bos, "tolist"):
+            tmp = raw_bos.tolist()
+            bos_ids = list(tmp[0]) if len(tmp) > 0 and isinstance(tmp[0], list) else list(tmp)
+        else:
+            raise TypeError("Unexpected BOS tokenization output type")
+
+        eos_id = getattr(vlm_tok, "eos_token_id", None)
 
         for i in range(bsz):
+            # Ensure Python lists for all segments
             ids_pref = pref["input_ids"][i]
-            ids_act = map_fast_to_vlm_ids(list(fast_tokens[i]))
-            ids = ids_pref + bos_ids + ids_act + ([eos_id] if eos_id is not None else [])
+            ids_pref = ids_pref if isinstance(ids_pref, list) else (ids_pref.tolist() if hasattr(ids_pref, "tolist") else list(ids_pref))
+            ftoks = fast_tokens[i]
+            ftoks = ftoks if isinstance(ftoks, list) else (ftoks.tolist() if hasattr(ftoks, "tolist") else list(ftoks))
+            ids_act = map_fast_to_vlm_ids(list(ftoks))
+            tail = ([int(eos_id)] if eos_id is not None else [])
+            ids = list(ids_pref) + list(bos_ids) + list(ids_act) + tail
             mask = [1] * len(ids)
-            lab = [-100] * (len(ids_pref) + len(bos_ids)) + ids_act[:] + ([-100] if eos_id is not None else [])
+            lab = [-100] * (len(ids_pref) + len(bos_ids)) + list(ids_act) + ([-100] if eos_id is not None else [])
             concat_ids.append(ids)
             attention_mask.append(mask)
             labels.append(lab)
