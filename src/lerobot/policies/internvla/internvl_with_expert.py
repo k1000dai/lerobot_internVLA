@@ -279,11 +279,11 @@ class InternVLWithExpertModel(nn.Module):
         q = torch.cat(qs, dim=1)
         k = torch.cat(ks, dim=1)
         v = torch.cat(vs, dim=1)
-        seq_len = q.shape[1]
-        pos = position_ids[:, :seq_len]
-        att_mask = attention_mask[:, :seq_len, :seq_len]
-        q = apply_rope(q, pos)
-        k = apply_rope(k, pos)
+        # Apply RoPE to current tokens (queries and current keys) using their local positions
+        q_len = q.shape[1]
+        q_pos = position_ids[:, :q_len]
+        q = apply_rope(q, q_pos)
+        k = apply_rope(k, q_pos)
 
         # KV cache handling
         if use_cache and past_key_values is None:
@@ -295,6 +295,9 @@ class InternVLWithExpertModel(nn.Module):
                 k = torch.cat([past_key_values[layer_idx]["key_states"], k], dim=1)
                 v = torch.cat([past_key_values[layer_idx]["value_states"], v], dim=1)
 
+        # Build attention mask that covers cached prefix K/V + current keys
+        k_len = k.shape[1]
+        att_mask = attention_mask[:, :q_len, :k_len]
         att_out = self.get_attention_interface()(att_mask, batch_size, head_dim, q, k, v)
         return [att_out], past_key_values
 
