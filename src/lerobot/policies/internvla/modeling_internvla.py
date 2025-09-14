@@ -222,19 +222,26 @@ class InternVLAPolicy(PreTrainedPolicy):
         # Build per-sample concatenated inputs and labels
         concat_ids, attention_mask, labels = [], [], []
 
-        bos = vlm_tok("Action: ", add_special_tokens=False, return_tensors=None)
-        raw_bos = bos.get("input_ids") if isinstance(bos, dict) else bos
-        # Normalize BOS ids to a flat list[int]
-        if isinstance(raw_bos, list):
-            if len(raw_bos) > 0 and isinstance(raw_bos[0], list):
-                bos_ids = list(raw_bos[0])
+        # Build BOS as a plain list[int] robustly
+        if hasattr(vlm_tok, "encode"):
+            bos_ids = vlm_tok.encode("Action: ", add_special_tokens=False)
+            if isinstance(bos_ids, int):
+                bos_ids = [int(bos_ids)]
             else:
-                bos_ids = list(raw_bos)
-        elif hasattr(raw_bos, "tolist"):
-            tmp = raw_bos.tolist()
-            bos_ids = list(tmp[0]) if len(tmp) > 0 and isinstance(tmp[0], list) else list(tmp)
+                bos_ids = [int(x) for x in (bos_ids.tolist() if hasattr(bos_ids, "tolist") else bos_ids)]
         else:
-            raise TypeError("Unexpected BOS tokenization output type")
+            bos_be = vlm_tok("Action: ", add_special_tokens=False, return_tensors=None)
+            raw_bos = bos_be.get("input_ids") if isinstance(bos_be, dict) else bos_be
+            if isinstance(raw_bos, list):
+                if len(raw_bos) > 0 and isinstance(raw_bos[0], list):
+                    bos_ids = [int(x) for x in raw_bos[0]]
+                else:
+                    bos_ids = [int(x) for x in raw_bos]
+            elif hasattr(raw_bos, "tolist"):
+                tmp = raw_bos.tolist()
+                bos_ids = [int(x) for x in (tmp[0] if len(tmp) > 0 and isinstance(tmp[0], list) else tmp)]
+            else:
+                raise TypeError("Unexpected BOS tokenization output type")
 
         eos_id = getattr(vlm_tok, "eos_token_id", None)
 
