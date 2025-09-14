@@ -285,16 +285,75 @@ class InternVLAPolicy(PreTrainedPolicy):
                 vt_device = input_ids.device
             pv = images[0].to(device=vt_device, dtype=torch.bfloat16)
 
-        # Compute CE loss with the VLM head (conditioned on images + text prompt)
-        if pv is not None:
-            outputs = self.model.vlm_with_expert.vlm(
-                pixel_values=pv, input_ids=input_ids, attention_mask=attn, labels=lab_padded, use_cache=False
-            )
+        # ---- Low-level path: embed images + text, drive language model via inputs_embeds ----
+        # Embed all available camera images (same as Expert path)
+        img_embs_list = []
+        if images is not None and isinstance(images, list) and len(images) > 0:
+            for img in images:
+                if img is None:
+                    continue
+                e = self.model.vlm_with_expert.embed_image(img.to(dtype=torch.bfloat16))
+                e = e * math.sqrt(e.shape[-1])
+                img_embs_list.append(e)
+        if len(img_embs_list) > 0:
+            img_embs = torch.cat(img_embs_list, dim=1)
+            bsz2, n_img_tokens, _ = img_embs.shape
         else:
-            outputs = self.model.vlm_with_expert.vlm(
-                input_ids=input_ids, attention_mask=attn, labels=lab_padded, use_cache=False
-            )
-        return outputs.loss
+            # No images: create a zero-length placeholder
+            bsz2 = bsz
+            n_img_tokens = 0
+            img_embs = None
+
+        # Embed text tokens (prefix+"Action:"+mapped FAST tokens)
+        text_embs = self.model.vlm_with_expert.embed_language_tokens(input_ids)
+        text_embs = text_embs * math.sqrt(text_embs.shape[-1])
+
+        # Concatenate image and text embeddings on sequence dimension
+        if img_embs is not None:
+            embs = torch.cat([img_embs.to(dtype=text_embs.dtype, device=text_embs.device), text_embs], dim=1)
+        else:
+            embs = text_embs
+
+        # Build pad masks (1 for valid tokens)
+        pad_img = torch.ones(bsz2, n_img_tokens, dtype=torch.bool, device=embs.device) if n_img_tokens > 0 else torch.zeros(bsz2, 0, dtype=torch.bool, device=embs.device)
+        pad_text = attn.to(dtype=torch.bool, device=embs.device)
+        pad_masks = torch.cat([pad_img, pad_text], dim=1)
+
+        # Build attention mask: images as prefix (0), text as causal (1)
+        att_img = torch.zeros(bsz2, n_img_tokens, dtype=torch.int32, device=embs.device) if n_img_tokens > 0 else torch.zeros(bsz2, 0, dtype=torch.int32, device=embs.device)
+        # For causal, set 1 for every text token
+        att_text = torch.where(pad_text, torch.ones_like(pad_text, dtype=torch.int32), torch.zeros_like(pad_text, dtype=torch.int32))
+        att_masks = torch.cat([att_img, att_text], dim=1)
+
+        # 2D attention + position ids
+        att_2d = make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+
+        # Run VLM text model via our mixer with only the VLM stream
+        outputs_embeds, _ = self.model.vlm_with_expert.forward(
+            attention_mask=att_2d,
+            position_ids=position_ids,
+            past_key_values=None,
+            inputs_embeds=[embs, None],
+            use_cache=False,
+            fill_kv_cache=False,
+            adarms_cond=None,
+        )
+        # Take VLM stream outputs and slice the text part
+        hidden = outputs_embeds[0]  # (B, n_img_tokens + T_max, D)
+        hidden_text = hidden[:, n_img_tokens : n_img_tokens + input_ids.shape[1], :]
+
+        # Project to logits via VLM lm_head
+        lm_head = self.model.vlm_with_expert.vlm.get_output_embeddings()
+        logits = lm_head(hidden_text)
+
+        vocab = logits.shape[-1]
+        loss = F.cross_entropy(
+            logits.reshape(-1, vocab).to(dtype=torch.float32),
+            lab_padded.reshape(-1),
+            ignore_index=-100,
+        )
+        return loss
 
     def prepare_images(self, batch: dict[str, Tensor]):
         images = []
