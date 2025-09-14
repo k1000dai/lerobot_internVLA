@@ -93,9 +93,15 @@ class InternVLWithExpertModel(nn.Module):
         lm = self.get_vlm_model().language_model
 
         def _resolve_layers_owner(text_model):
-            # Try common containers that own the decoder layers
-            for attr in ("model", "text_model", "transformer", "decoder", None):
-                owner = getattr(text_model, attr) if attr else text_model
+            # Prefer the direct container (e.g., Qwen3Model has .layers)
+            layers = getattr(text_model, "layers", None)
+            if layers is not None:
+                return text_model, layers
+            # Fallback to common inner modules
+            for attr in ("model", "text_model", "transformer", "decoder"):
+                owner = getattr(text_model, attr, None)
+                if owner is None:
+                    continue
                 layers = getattr(owner, "layers", None)
                 if layers is not None:
                     return owner, layers
@@ -129,6 +135,28 @@ class InternVLWithExpertModel(nn.Module):
         self.head_dim = config.text_config.head_dim
         self.vlm_hidden_size = config.text_config.hidden_size
         self.expert_hidden_size = text_cfg.hidden_size
+
+        # If using cross-attention mixing, adapt expert K/V projections to accept VLM memory width
+        if "cross" in self.attention_mode:
+            try:
+                expert_layers = getattr(self.lm_expert, "layers", None)
+                if expert_layers is None and hasattr(self.lm_expert, "model"):
+                    expert_layers = getattr(self.lm_expert.model, "layers", None)
+                if expert_layers is None:
+                    raise AttributeError
+                in_features = config.text_config.num_key_value_heads * config.text_config.head_dim
+                out_features = text_cfg.num_key_value_heads * text_cfg.head_dim
+                bias_flag = getattr(text_cfg, "attention_bias", False)
+                for layer_idx in range(len(expert_layers)):
+                    if self.self_attn_every_n_layers > 0 and layer_idx % self.self_attn_every_n_layers == 0:
+                        # Keep self-attn layers untouched when interleaving
+                        continue
+                    layer = expert_layers[layer_idx]
+                    layer.self_attn.k_proj = nn.Linear(in_features, out_features, bias=bias_flag)
+                    layer.self_attn.v_proj = nn.Linear(in_features, out_features, bias=bias_flag)
+            except Exception:
+                # Fallback: leave expert projections unchanged for self-attn only mode
+                pass
 
         self._set_requires_grad()
 
@@ -341,8 +369,15 @@ class InternVLWithExpertModel(nn.Module):
         lm = self.get_vlm_model().language_model
 
         def _resolve_layers(module):
-            for attr in ("model", "text_model", "transformer", "decoder", None):
-                base = getattr(module, attr) if attr else module
+            # Prefer direct .layers (Qwen3Model)
+            layers = getattr(module, "layers", None)
+            if layers is not None:
+                return module, layers
+            # Else try common wrappers
+            for attr in ("model", "text_model", "transformer", "decoder"):
+                base = getattr(module, attr, None)
+                if base is None:
+                    continue
                 layers = getattr(base, "layers", None)
                 if layers is not None:
                     return base, layers

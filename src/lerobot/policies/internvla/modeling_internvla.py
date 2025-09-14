@@ -274,7 +274,8 @@ class InternVLAFlowMatching(nn.Module):
 
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
-        att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)[None, :].expand(bsz, -1)
+        # Use integer mask for cumulative attention construction (avoid bool cumsum)
+        att_masks = torch.tensor(att_masks, dtype=torch.int32, device=pad_masks.device)[None, :].expand(bsz, -1)
         return embs, pad_masks, att_masks
 
     def embed_suffix(self, noisy_actions, timestep):
@@ -314,7 +315,8 @@ class InternVLAFlowMatching(nn.Module):
         att_masks += [1] + ([0] * (emb.shape[1] - 1))
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
-        att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
+        # Integer mask for cumulative attention
+        att_masks = torch.tensor(att_masks, dtype=torch.int32, device=embs.device)
         att_masks = att_masks[None, :].expand(bsz, len(att_masks))
         return embs, pad_masks, att_masks, adarms_cond
 
@@ -401,4 +403,3 @@ class InternVLAFlowMatching(nn.Module):
         suff_out = suff_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suff_out)
         return v_t
-
