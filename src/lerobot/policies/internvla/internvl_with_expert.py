@@ -78,8 +78,12 @@ class InternVLWithExpertModel(nn.Module):
 
         # Load InternVL VLM
         if load_vlm_weights:
+            # Load on a single device per process; DDP handles device placement.
+            # Avoid device_map="auto" which shards across multiple GPUs and breaks per-rank execution.
             self.vlm = InternVLForConditionalGeneration.from_pretrained(
-                model_id, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, device_map="auto"
+                model_id,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
             )
             config = self.vlm.config
         else:
@@ -186,8 +190,14 @@ class InternVLWithExpertModel(nn.Module):
 
     # Embedding helpers
     def embed_image(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        # pixel_values expected as (B,3,H,W), float/bfloat; InternVL handles projection
-        image_hidden_states = self.vlm.get_image_features(pixel_values=pixel_values)
+        # pixel_values expected as (B,3,H,W), float/bfloat; ensure same device as vision tower
+        try:
+            vt_param = next(self.get_vlm_model().vision_tower.parameters())
+            vt_device = vt_param.device
+        except StopIteration:
+            vt_device = pixel_values.device
+        pv = pixel_values.to(device=vt_device)
+        image_hidden_states = self.vlm.get_image_features(pixel_values=pv)
         return image_hidden_states  # (B, N_img, D_txt)
 
     def embed_language_tokens(self, tokens: torch.Tensor) -> torch.Tensor:

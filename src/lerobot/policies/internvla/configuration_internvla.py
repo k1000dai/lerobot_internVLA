@@ -68,14 +68,14 @@ class InternVLAConfig(PreTrainedConfig):
     fast_repo_id: str = "physical-intelligence/fast"
 
     # Training presets
-    optimizer_lr: float = 1e-4
+    optimizer_lr: float = 5e-4
     optimizer_betas: tuple[float, float] = (0.9, 0.95)
     optimizer_eps: float = 1e-8
     optimizer_weight_decay: float = 1e-10
     optimizer_grad_clip_norm: float = 10.0
     scheduler_warmup_steps: int = 1_000
-    scheduler_decay_steps: int = 30_000
-    scheduler_decay_lr: float = 2.5e-6
+    scheduler_decay_steps: int = 50_000
+    scheduler_decay_lr: float = 5e-5
 
     def __post_init__(self):
         super().__post_init__()
