@@ -20,6 +20,7 @@ from tqdm import tqdm
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.act_vla import ACTVLAConfig, ACTVLAPolicy
+from lerobot.policies.internvla import InternVLAConfig, InternVLAPolicy
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -31,12 +32,12 @@ NUM_STEPS_WAIT = 10
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def eval() -> None:
-    policy_path: str = "k1000dai/actvla_test"
+    policy_path: str = "k1000dai/internvla_libero"
     num_trials_per_task: int = 10 # Number of rollouts per task.
     out_base_path = "data/libero"
     
     task_suite_name_list = [ "libero_spatial", "libero_object", "libero_goal", "libero_10"]
-    time_pair = [(0,1),(0,5),(0,10),(0,30),(0,40),(0,50)]
+    time_pair = [(0,10)]
     time_pair.reverse()  # Reverse to start with the smallest execute_horizon and inference_delay
     seed = 7
     # Set random seed
@@ -44,8 +45,7 @@ def eval() -> None:
     np.random.seed(seed)
 
     # --- Load Policy ---
-    #policy = PreTrainedConfig.from_pretrained(policy_path)
-    policy  = ACTVLAPolicy.from_pretrained(policy_path)
+    policy  = InternVLAPolicy.from_pretrained(policy_path)
     policy = policy.to(DEVICE)
     
 
@@ -76,7 +76,7 @@ def eval() -> None:
     logging.info("=== Evaluation completed ===")
     
 
-def eval_libero(policy:ACTVLAPolicy,
+def eval_libero(policy,
                 task_suite_name: str = "libero_spatial", 
                 num_trials_per_task: int = 10, 
                 seed: int = 7,
