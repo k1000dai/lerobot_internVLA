@@ -36,6 +36,7 @@ from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.policies.internvla.configuration_internvla import InternVLAConfig
 from lerobot.policies.act_vla.configuration_act_vla import ACTVLAConfig
 from lerobot.policies.tdmpc.configuration_tdmpc import TDMPCConfig
+from lerobot.policies.vla_adapter.configuration_vla_adapter import VLAAdapterConfig
 from lerobot.policies.vqbet.configuration_vqbet import VQBeTConfig
 
 
@@ -89,6 +90,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.policies.internvla.modeling_internvla import InternVLAPolicy
 
         return InternVLAPolicy
+    elif name == "vla_adapter":
+        from lerobot.policies.vla_adapter.modeling_vla_adapter import VLAAdapterPolicy
+
+        return VLAAdapterPolicy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -118,6 +123,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return ACTVLAConfig(**kwargs)
     elif policy_type == "internvla":
         return InternVLAConfig(**kwargs)
+    elif policy_type == "vla_adapter":
+        return VLAAdapterConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 
