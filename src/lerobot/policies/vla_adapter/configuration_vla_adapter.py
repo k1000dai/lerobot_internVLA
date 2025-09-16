@@ -48,12 +48,14 @@ class VLAAdapterConfig(PreTrainedConfig):
     tokenizer_name: str | None = None
     tokenizer_max_length: int = 128
     vlm_model_name: str = "Qwen/Qwen2.5-0.5B"
-    freeze_vlm: bool = True
+    freeze_vlm: bool = False
     patch_size: int = 14
     num_action_queries: int = 64
 
     # Policy (Bridge Attention)
-    policy_num_heads: int | None = None
+    policy_hidden_size: int = 384
+    policy_num_layers: int | None = None
+    policy_num_heads: int = 8
     policy_mlp_ratio: float = 4.0
     bridge_ratio_init: float = 0.0
 
@@ -79,6 +81,10 @@ class VLAAdapterConfig(PreTrainedConfig):
             )
         if self.num_action_queries <= 0:
             raise ValueError("num_action_queries must be positive for VLA-Adapter.")
+        if self.policy_hidden_size <= 0:
+            raise ValueError("policy_hidden_size must be positive.")
+        if self.policy_num_layers is not None and self.policy_num_layers <= 0:
+            raise ValueError("policy_num_layers must be positive when provided.")
 
     def validate_features(self) -> None:
         # Ensure proprioceptive / state feature exists when declared in config

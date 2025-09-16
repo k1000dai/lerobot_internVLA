@@ -298,9 +298,23 @@ class BridgeAttentionBlock(nn.Module):
 class BridgePolicy(nn.Module):
     """Policy head composed of stacked Bridge Attention blocks."""
 
-    def __init__(self, config: VLAAdapterConfig, hidden_size: int, num_layers: int, num_heads: int) -> None:
+    def __init__(
+        self,
+        config: VLAAdapterConfig,
+        backbone_hidden_size: int,
+        backbone_layers: int,
+        backbone_heads: int,
+    ) -> None:
         super().__init__()
         self.config = config
+        hidden_size = config.policy_hidden_size
+        num_layers = config.policy_num_layers or backbone_layers
+        num_heads = config.policy_num_heads or backbone_heads
+        if hidden_size % num_heads != 0:
+            raise ValueError(
+                "policy_hidden_size must be divisible by policy_num_heads. "
+                f"Got hidden={hidden_size}, heads={num_heads}."
+            )
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.initial_embed = nn.Sequential(
@@ -310,6 +324,8 @@ class BridgePolicy(nn.Module):
             nn.Linear(hidden_size, hidden_size),
         )
         self.proprio_proj = nn.Linear(config.max_state_dim, hidden_size)
+        self.raw_proj = nn.Linear(backbone_hidden_size, hidden_size)
+        self.aq_proj = nn.Linear(backbone_hidden_size, hidden_size)
         self.layers = nn.ModuleList(
             [
                 BridgeAttentionBlock(
@@ -346,9 +362,12 @@ class BridgePolicy(nn.Module):
         latent = self.initial_embed(initial_actions)
         proprio_token = self.proprio_proj(proprio)
 
+        proj_raw = [self.raw_proj(r.to(dtype=latent.dtype)) for r in raw_features]
+        proj_aq = [self.aq_proj(a.to(dtype=latent.dtype)) for a in action_query_features]
+
         for idx, layer in enumerate(self.layers):
-            raw = raw_features[min(idx, len(raw_features) - 1)].to(latent.dtype)
-            aq = action_query_features[min(idx, len(action_query_features) - 1)].to(latent.dtype)
+            raw = proj_raw[min(idx, len(proj_raw) - 1)]
+            aq = proj_aq[min(idx, len(proj_aq) - 1)]
             latent = layer(latent, raw, aq, proprio_token, raw_mask, aq_mask)
 
         latent = self.final_norm(latent)
@@ -366,12 +385,11 @@ class VLAAdapterModel(nn.Module):
         super().__init__()
         self.config = config
         self.backbone = QwenBackbone(config)
-        num_heads = config.policy_num_heads or self.backbone.num_attention_heads
         self.policy = BridgePolicy(
             config,
-            hidden_size=self.backbone.hidden_size,
-            num_layers=self.backbone.num_layers,
-            num_heads=num_heads,
+            backbone_hidden_size=self.backbone.hidden_size,
+            backbone_layers=self.backbone.num_layers,
+            backbone_heads=self.backbone.num_attention_heads,
         )
 
     def forward(
