@@ -34,3 +34,13 @@ Dataset is here : https://huggingface.co/datasets/k1000dai/libero
 - Object: 97
 - Goal: 85
 - LIBERO-10: 72
+
+# VLA Adapter with Qwen 0.5B
+
+## Results
+
+- spatial : 96.0 %
+- object  : 97.4 %
+- goal : 95.4%
+- 10 : 79.2 %
+
